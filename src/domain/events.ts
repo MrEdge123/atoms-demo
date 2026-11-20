@@ -8,9 +8,11 @@ export type AgentRole = 'iris' | 'emma' | 'alex' | 'system';
  */
 export type AgentEventType =
   | 'role_start'
+  | 'intent_routed'
   | 'thought'
   | 'research_ready'
   | 'plan_ready'
+  | 'agent_message'
   | 'file_write'
   | 'build_result'
   | 'autofix_start'

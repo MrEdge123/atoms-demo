@@ -782,6 +782,106 @@ export class MockLLMProvider implements LLMProvider {
         input.abortSignal.reason ?? new Error('LLM request aborted')
       );
     }
+    if (input.system.startsWith('You are the Intent Router')) {
+      const msg = extractSection(input.prompt, 'User Message:');
+      const isResearch =
+        /(调研|竞品|市场|benchmark|留存|商业化|定价|用户画像|对比其他)/i.test(msg);
+      const isConcreteAction =
+        /(改成|改为|调整为|换为|换成|增加|添加|新增|删除|移除|去掉|修复|报错|异常|bug|fix|#[0-9a-f]{3,6}|按方案|采用方案|采用第)/i.test(
+          msg
+        );
+
+      if (isResearch) {
+        return input.schema.parse({
+          targetRole: 'iris',
+          intent: 'research',
+          reason: '识别到调研与市场分析诉求，已转交 Iris 调研',
+        });
+      }
+      if (!isConcreteAction) {
+        return input.schema.parse({
+          targetRole: 'emma',
+          intent: 'discuss',
+          reason: '需求尚待探讨或未指定具体改动，先由 Emma 与你确认方向',
+        });
+      }
+      return input.schema.parse({
+        targetRole: 'alex',
+        intent: 'implement',
+        reason: '检测到明确修改指令，已直接交由 Alex 改版',
+      });
+    }
+
+    if (input.system.startsWith('You are Emma, discussing')) {
+      const msg = extractSection(input.prompt, 'User Message:');
+      const aboutColor = /(配色|颜色|色调|风格|主题|视觉|排版|样式)/i.test(msg);
+      const output = aboutColor
+        ? {
+            reply:
+              '我们可以先敲定配色方向再让工程师动代码。结合当前产品氛围，推荐下面 3 套对比度与辨识度都经过校验的方案，你可以直接点选其中一套交由 Alex 落地，也可以告诉我具体偏好的主色或明暗基调：',
+            options: [
+              {
+                title: '深海蓝高对比方案',
+                description: '主按钮与高亮切换为沉稳深蓝色，保留当前排版结构，清晰耐看。',
+                executeInstruction:
+                  '将主强调色与主按钮改成深蓝色，保留当前布局与功能不变',
+              },
+              {
+                title: '暖纸浅色编辑风',
+                description: '切换为高可读浅色背景与深蓝强调色，适合长时间浏览与阅读。',
+                executeInstruction:
+                  '切换为浅色模式背景，并将主按钮主色调改成深蓝色，保留所有功能不变',
+              },
+              {
+                title: '暗夜沉浸质感风',
+                description: '采用深色沉浸背景搭配醒目高亮控件，聚焦核心操作区域。',
+                executeInstruction:
+                  '切换为深色暗夜背景基调，同时提升按钮与卡片边框对比度',
+              },
+            ],
+            followUpQuestion:
+              '你更倾向浅色高可读，还是继续保留深色沉浸风？也可以直接点击上方方案让 Alex 执行。',
+          }
+        : {
+            reply:
+              '收到，我们可以先对齐产品方向再决定要不要改代码。基于你当前的方案，我整理了 3 个性价比最高的增强方向供你拍板：',
+            options: [
+              {
+                title: '强化视觉主色调',
+                description: '统一主操作区为深蓝色调，让关键转化按钮更突出。',
+                executeInstruction: '将主色调改成深蓝色，优化视觉层级',
+              },
+              {
+                title: '开放数据导出 (CSV)',
+                description: '在列表顶部新增一键导出 CSV 按钮，方便离线统计与归档。',
+                executeInstruction: '增加导出 CSV 按钮',
+              },
+            ],
+            followUpQuestion: '你想优先打磨视觉体验，还是补齐哪项核心业务能力？',
+          };
+      return input.schema.parse(output);
+    }
+
+    if (input.system.startsWith('You are Iris, answering')) {
+      const msg = extractSection(input.prompt, 'User Research Question:');
+      return input.schema.parse({
+        reply: `针对你的问题「${msg.slice(0, 48)}」，从同类轻量化 Web 应用的实践来看：首屏即用免注册体验能明显降低跳出率（通常比强登录拦截高 35%+），而明确的状态反馈与一键导出数据往往是提升留存与付费转化的核心钩子。`,
+        options: [
+          {
+            title: '补充一键 CSV 导出转化钩子',
+            description: '满足核心高频数据归档诉求，提升工具型用户留存。',
+            executeInstruction: '增加导出 CSV 按钮',
+          },
+          {
+            title: '优化主按钮深蓝高对比聚焦',
+            description: '借鉴主流高转化产品视觉聚焦策略，凸显主行动点。',
+            executeInstruction: '将主色调改成深蓝色',
+          },
+        ],
+        followUpQuestion: '是否需要进一步分析竞品定价策略，或直接选择上述方向落地？',
+      });
+    }
+
     if (input.system.startsWith('You are Iris,')) {
       const idea =
         extractSection(

@@ -7,15 +7,19 @@ export {
   isPlanningInProgress,
 } from './guards';
 export {
+  agentReplySchema,
   alexFilesOutputSchema,
   designScenarioIdSchema,
   designSystemSchema,
+  intentRouteSchema,
   mergeVirtualFS,
   normalizePath,
   productPlanSchema,
   researchOutputSchema,
   styleThemeSchema,
+  type AgentReplyOutput,
   type AlexFilesOutput,
+  type IntentRouteOutput,
   type ResearchOutput,
 } from './schemas';
 export { ATOMS_CLOUD_SDK_SOURCE, getCloudSdkPromptDocs } from './sdk-client';
@@ -24,7 +28,10 @@ export {
   buildAlexFixPrompt,
   buildAlexGeneratePrompt,
   buildAlexIteratePrompt,
+  buildEmmaDiscussPrompt,
   buildEmmaPrompt,
+  buildIntentRouterPrompt,
+  buildIrisDiscussPrompt,
   buildIrisPrompt,
 } from './roles';
 export {

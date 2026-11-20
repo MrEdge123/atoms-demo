@@ -46,7 +46,7 @@ export function buildEmmaPrompt(
     system: `You are Emma, an AI Product Manager & Design Director at Atoms.
 Convert the market research into a tight, buildable MVP ProductPlan AND a tailored "designSystem" blueprint.
 Only include capabilities that the product genuinely needs from: "db", "auth", "billing", "ai".
-Always include "db" when the app stores records. Include "auth" for user accounts/admin login. Include "billing" for Pro/paid subscription tiers.
+Always include "db" when the app stores records. Include "auth" for user accounts/admin login or whenever users have personal profiles, private saved data, or need to edit/delete their own records (db.update / db.remove / { mine: true } require "auth"). Include "billing" for Pro/paid subscription tiers.
 Also populate "seo" with concise title and description. Use the user's language.
 ${designPrompt}`,
     prompt: `Original Idea:
@@ -92,8 +92,9 @@ ${sdkDocs}
 
 ${designGuide}
 6. Never display internal SDK, builder, or platform terms ('@atoms/cloud', 'Powered by @atoms/cloud', '数据自主可控', 'PGlite', 'Esbuild', 'Route A+') anywhere in visible UI headings, badges, or footers — all visible UI copy must belong strictly to the user's product brand.
-7. Target ~300-520 lines total across 2-4 clean modular files ("src/App.tsx" + "src/components/*.tsx"; you do NOT need to rewrite "DESIGN.md" unless refining tokens). Keep code concise with zero bloated mock arrays or redundant comments.
-8. Return strictly valid JSON matching { "summary": string, "files": Array<{ "path": string, "content": string }> } (with optional "deletes").`,
+7. Never block rendering the primary interactive experience (e.g., game canvas, landing view, or tool workspace) behind a full-page fatal error if an optional cloud fetch fails or the visitor is not logged in yet — degrade gracefully to playable/usable guest mode and show inline non-blocking prompts when login is required for saving personal data.
+8. Target ~300-520 lines total across 2-4 clean modular files ("src/App.tsx" + "src/components/*.tsx"; you do NOT need to rewrite "DESIGN.md" unless refining tokens). Keep code concise with zero bloated mock arrays or redundant comments.
+9. Return strictly valid JSON matching { "summary": string, "files": Array<{ "path": string, "content": string }> } (with optional "deletes").`,
     prompt: `Build the application described by this confirmed ProductPlan:
 ${JSON.stringify(input.plan, null, 2)}
 
@@ -137,12 +138,17 @@ export function buildAlexIteratePrompt(input: {
   plan: ProductPlan;
   files: VirtualFS;
   instruction: string;
+  recentContext?: string;
 }): { system: string; prompt: string } {
   const sdkDocs = getCloudSdkPromptDocs(input.plan.capabilities);
   const designGuardrail = getAlexIterateDesignGuardrail(input.plan);
+  const discussionSection = input.recentContext?.trim()
+    ? `\nRecent Team Discussion Context:\n${input.recentContext.trim()}\n`
+    : '';
   return {
     system: `You are Alex, iterating on an existing Atoms React + TypeScript application.
 Preserve existing @atoms/cloud collection names and data shapes so previously stored user records remain compatible!
+Never block the primary interactive UI behind a full-page fatal error when optional cloud reads fail or the visitor is unauthenticated — degrade gracefully to playable/usable guest mode and use inline non-blocking prompts when login is required for personal data.
 Never render internal SDK or platform jargon ('@atoms/cloud', 'Powered by @atoms/cloud', '数据自主可控', 'PGlite', 'Esbuild', 'Route A+') in any visible UI badges, headings, or footers — preserve clean product branding.
 Allowed packages ONLY: "react", "react-dom", "lucide-react", "clsx", "tailwind-merge", "@atoms/cloud".
 Return strictly valid JSON matching { "summary": string, "files": Array<{ "path": string, "content": string }> }.
@@ -151,7 +157,7 @@ ${sdkDocs}
 ${designGuardrail}`,
     prompt: `Product Plan:
 ${JSON.stringify(input.plan, null, 2)}
-
+${discussionSection}
 Current VirtualFS files:
 ${JSON.stringify(input.files, null, 2)}
 
@@ -159,5 +165,82 @@ User Iteration Instruction:
 ${input.instruction}
 
 Update the necessary files cleanly while preserving DESIGN.md aesthetic consistency, and return the updated files.`,
+  };
+}
+
+export function buildIntentRouterPrompt(input: {
+  plan: ProductPlan | null;
+  designSummary?: string;
+  recentContext?: string;
+  message: string;
+}): { system: string; prompt: string } {
+  return {
+    system: `You are the Intent Router for Mini Atoms, a multi-agent AI product studio with three specialists:
+- "iris" (intent: "research"): Deep Researcher. Route here when the user asks about market benchmarks, competitor approaches, user segmentation, retention, pricing models, or wants external industry insights before deciding.
+- "emma" (intent: "discuss"): Product Manager & Visual Design Director. Route here when the user wants to discuss product scope, UX flow, visual direction, feature trade-offs, brainstorm ideas, ask for recommendations, OR expresses an open-ended / underspecified preference without giving exact implementation details (e.g. "我想改配色", "风格想换一换", "还能加什么功能", "聊聊整体设计").
+- "alex" (intent: "implement"): Full-Stack Engineer. Route here ONLY when the user gives a concrete, specific, actionable instruction to implement, edit, style, or fix code/UI right away (e.g. specifying concrete target colors/text/layout/button/bugfix, or explicitly approving a previously suggested option such as "按方案 1 改" or "采用第一个方案").
+
+Semantic Decision Guidelines:
+- When a user says "I want to change X" or explores options without specifying concrete values or asking to discuss/choose options, prefer "emma" ("discuss") over immediately rewriting code with "alex".
+- Do NOT apply brittle keyword matching; judge true user intent from the message and recent discussion context.
+- Return strictly valid JSON matching { "targetRole": "iris" | "emma" | "alex", "intent": "research" | "discuss" | "implement", "reason": string }.
+- Write "reason" concisely (<= 40 chars recommended) in the same language as the user's message.`,
+    prompt: `Current App Summary:
+${input.plan ? `${input.plan.appName}: ${input.plan.summary}` : '(No product plan yet)'}
+${input.designSummary ? `\nDesign Direction:\n${input.designSummary}` : ''}
+${input.recentContext ? `\nRecent Conversation Context:\n${input.recentContext}` : ''}
+
+User Message:
+${input.message}`,
+  };
+}
+
+export function buildEmmaDiscussPrompt(input: {
+  plan: ProductPlan | null;
+  designMd?: string;
+  recentContext?: string;
+  message: string;
+}): { system: string; prompt: string } {
+  return {
+    system: `You are Emma, discussing product and visual design with the user at Mini Atoms.
+Do NOT write or output source code files — you are consulting with the user before Alex edits the code.
+Respond concisely, practically, and warmly in the user's language (Chinese if the prompt is Chinese).
+Provide:
+1. "reply": Direct, tailored product/design advice (3-6 sentences) grounded in the current app and visual system.
+2. "options": 2-3 concrete, distinct actionable proposals the user can pick from with one click. Every option MUST have:
+   - "title": concise label (<= 24 chars recommended)
+   - "description": 1-sentence user-facing benefit / visual effect
+   - "executeInstruction": a crystal-clear, self-contained engineering instruction (with exact hex palette codes, typography, layout, or feature spec) ready to pass directly to Alex if the user clicks it.
+3. "followUpQuestion": optional 1 short clarifying question to help the user decide.
+Return strictly valid JSON matching { "reply": string, "options": [{ "title", "description", "executeInstruction" }], "followUpQuestion"?: string }.`,
+    prompt: `Current Product Plan:
+${input.plan ? JSON.stringify(input.plan, null, 2) : '(No plan)'}
+${input.designMd ? `\nCurrent DESIGN.md (excerpt):\n${input.designMd.slice(0, 1200)}` : ''}
+${input.recentContext ? `\nRecent Discussion Context:\n${input.recentContext}` : ''}
+
+User Message:
+${input.message}`,
+  };
+}
+
+export function buildIrisDiscussPrompt(input: {
+  plan: ProductPlan | null;
+  recentContext?: string;
+  message: string;
+}): { system: string; prompt: string } {
+  return {
+    system: `You are Iris, answering a follow-up market and competitor research question for the user at Mini Atoms.
+Respond concisely and realistically in the user's language (Chinese if the prompt is Chinese), without outputting code files.
+Provide:
+1. "reply": Concise market/competitor benchmarks, user psychology takeaways, and actionable positioning insights (3-6 sentences).
+2. "options": Optional 1-3 concrete productized directions backed by your research, each with "title", "description", and a self-contained "executeInstruction" ready for Alex if the user wants to implement it immediately.
+3. "followUpQuestion": Optional 1 short question to explore further.
+Return strictly valid JSON matching { "reply": string, "options"?: [{ "title", "description", "executeInstruction" }], "followUpQuestion"?: string }.`,
+    prompt: `Current Product Context:
+${input.plan ? `${input.plan.appName} (${input.plan.targetUsers}): ${input.plan.summary}` : '(No plan)'}
+${input.recentContext ? `\nRecent Conversation Context:\n${input.recentContext}` : ''}
+
+User Research Question:
+${input.message}`,
   };
 }

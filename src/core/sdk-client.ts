@@ -115,6 +115,9 @@ async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> 
 
 export const db = {
   async list<T = Record<string, unknown>>(collection: string, filter?: { mine?: boolean }): Promise<CloudRecord<T>[]> {
+    if (filter?.mine && !readToken()) {
+      return [];
+    }
     const pid = encodeURIComponent(getConfig().projectId);
     const col = encodeURIComponent(collection);
     const qs = filter?.mine ? '?mine=1' : '';
@@ -246,19 +249,29 @@ export const ai = {
  * based on the project's declared capabilities.
  */
 export function getCloudSdkPromptDocs(capabilities: CloudCapability[]): string {
+  const hasAuth = capabilities.includes('auth');
   const sections: string[] = [
     `Import capabilities strictly from '@atoms/cloud':`,
     `import { ${capabilities.join(', ')} } from '@atoms/cloud';`,
   ];
 
   if (capabilities.includes('db')) {
-    sections.push(
-      `db API:
-- db.list<T>(collection, { mine?: boolean }) -> Promise<Array<{ id, data: T, ownerUserId, createdAt }>>
-- db.create<T>(collection, data: T) -> Promise<CloudRecord<T>>
-- db.update<T>(collection, id, patch: Partial<T>) -> Promise<CloudRecord<T>>
-- db.remove(collection, id) -> Promise<void>`
-    );
+    if (hasAuth) {
+      sections.push(
+        `db API:
+- db.list<T>(collection, { mine?: boolean }) -> Promise<Array<{ id, data: T, ownerUserId, createdAt }>> (Note: { mine: true } requires a logged-in user and returns [] before login; public views such as leaderboards or landing feeds MUST call db.list(collection) without { mine: true })
+- db.create<T>(collection, data: T) -> Promise<CloudRecord<T>> (associates ownerUserId when logged in, or null for guest writes)
+- db.update<T>(collection, id, patch: Partial<T>) -> Promise<CloudRecord<T>> (requires a logged-in user token and record ownership; throws HTTP 401 when unauthenticated or HTTP 403 for non-owners)
+- db.remove(collection, id) -> Promise<void> (requires a logged-in user token and record ownership; throws HTTP 401 when unauthenticated or HTTP 403 for non-owners)`
+      );
+    } else {
+      sections.push(
+        `db API (DB-only guest mode — "auth" is NOT enabled in this plan):
+- db.list<T>(collection) -> Promise<Array<{ id, data: T, ownerUserId, createdAt }>> (DO NOT pass { mine: true } when "auth" is disabled)
+- db.create<T>(collection, data: T) -> Promise<CloudRecord<T>> (persists public/guest records such as leaderboard scores or submissions)
+- IMPORTANT: db.update() and db.remove() require a logged-in auth token (HTTP 401 without "auth"). For guest-only local settings or personal bests when "auth" is disabled, store them in React state or try/catch localStorage rather than calling db.list(..., { mine: true }) or db.update().`
+      );
+    }
   }
 
   if (capabilities.includes('auth')) {

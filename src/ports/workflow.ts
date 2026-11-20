@@ -36,7 +36,11 @@ export interface WorkflowEngine {
   iterate(
     projectId: string,
     instruction: string,
-    opts?: { model?: string; signal?: AbortSignal }
+    opts?: {
+      model?: string;
+      targetRole?: 'auto' | 'iris' | 'emma' | 'alex';
+      signal?: AbortSignal;
+    }
   ): AsyncIterable<AgentEvent>;
 
   publish(projectId: string): Promise<PublishResult>;

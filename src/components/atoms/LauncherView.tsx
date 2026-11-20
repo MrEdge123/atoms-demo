@@ -362,8 +362,8 @@ export function LauncherView({
       {/* Main Launcher Canvas */}
       <div className="flex-1 min-w-0 flex flex-col overflow-y-auto atoms-hero-glow">
         {/* Top Bar */}
-        <header className="h-12 shrink-0 px-4 md:px-6 flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2.5">
+        <header className="h-12 shrink-0 px-4 md:px-6 flex items-center justify-between md:grid md:grid-cols-[1fr_auto_1fr] gap-3">
+          <div className="flex items-center gap-2.5 md:justify-self-start">
             {!sidebarOpen && (
               <button
                 type="button"
@@ -403,12 +403,12 @@ export function LauncherView({
             </div>
           </div>
 
-          <div className="hidden sm:inline-flex items-center gap-1.5 rounded-full border border-black/[0.08] bg-white/80 backdrop-blur-sm px-3 py-1 text-[11px] font-medium text-[#0c0c0c]/75">
+          <div className="hidden md:inline-flex md:justify-self-center items-center gap-1.5 rounded-full border border-black/[0.08] bg-white/80 backdrop-blur-sm px-3 py-1 text-[11px] font-medium text-[#0c0c0c]/75">
             <Sparkles className="w-3 h-3 text-[#4267ff]" />
             Iris · Emma · Alex 多智能体协作工作台
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 md:justify-self-end">
             <ModelDropdown
               models={models}
               selectedModel={selectedModel}

@@ -38,7 +38,15 @@ interface AlexRunBlock {
     bundleBytes?: number;
     errors?: Array<{ message: string }>;
   }>;
+  routeReason?: string;
+  explicitRoute?: boolean;
   timestamp: string;
+}
+
+interface AgentReplyOption {
+  title: string;
+  description: string;
+  executeInstruction: string;
 }
 
 type TimelineItem =
@@ -53,6 +61,17 @@ type TimelineItem =
       kind: 'emma_plan';
       key: string;
       plan: ProductPlan;
+      timestamp: string;
+    }
+  | {
+      kind: 'agent_reply';
+      key: string;
+      role: 'emma' | 'iris';
+      reply: string;
+      options?: AgentReplyOption[];
+      followUpQuestion?: string;
+      routeReason?: string;
+      explicit?: boolean;
       timestamp: string;
     }
   | AlexRunBlock
@@ -90,19 +109,19 @@ function buildTimelineItems(events: AgentEvent[]): TimelineItem[] {
           text: payload.idea,
           timestamp: ev.timestamp,
         });
-      } else if (ev.role === 'alex') {
-        if (
-          typeof payload.instruction === 'string' &&
-          payload.instruction.trim()
-        ) {
-          flushAlex();
-          items.push({
-            kind: 'user_prompt',
-            key: `iter-${ev.seq}-${i}`,
-            text: payload.instruction,
-            timestamp: ev.timestamp,
-          });
-        }
+      } else if (
+        typeof payload.instruction === 'string' &&
+        payload.instruction.trim()
+      ) {
+        flushAlex();
+        items.push({
+          kind: 'user_prompt',
+          key: `iter-${ev.seq}-${i}`,
+          text: payload.instruction,
+          timestamp: ev.timestamp,
+        });
+      }
+      if (ev.role === 'alex') {
         flushAlex();
         currentAlex = {
           kind: 'alex_run',
@@ -112,9 +131,54 @@ function buildTimelineItems(events: AgentEvent[]): TimelineItem[] {
           files: [],
           autoFixRounds: 0,
           buildResults: [],
+          routeReason:
+            typeof payload.routeReason === 'string'
+              ? payload.routeReason
+              : undefined,
+          explicitRoute:
+            typeof payload.explicit === 'boolean' ? payload.explicit : undefined,
           timestamp: ev.timestamp,
         };
       }
+      continue;
+    }
+
+    if (ev.type === 'intent_routed') {
+      continue;
+    }
+
+    if (
+      ev.type === 'agent_message' &&
+      (ev.role === 'emma' || ev.role === 'iris') &&
+      typeof payload.reply === 'string'
+    ) {
+      flushAlex();
+      items.push({
+        kind: 'agent_reply',
+        key: `reply-${ev.seq}-${i}`,
+        role: ev.role,
+        reply: payload.reply,
+        options: Array.isArray(payload.options)
+          ? (payload.options as AgentReplyOption[]).filter(
+              (o) =>
+                o &&
+                typeof o.title === 'string' &&
+                typeof o.description === 'string' &&
+                typeof o.executeInstruction === 'string'
+            )
+          : undefined,
+        followUpQuestion:
+          typeof payload.followUpQuestion === 'string'
+            ? payload.followUpQuestion
+            : undefined,
+        routeReason:
+          typeof payload.routeReason === 'string'
+            ? payload.routeReason
+            : undefined,
+        explicit:
+          typeof payload.explicit === 'boolean' ? payload.explicit : undefined,
+        timestamp: ev.timestamp,
+      });
       continue;
     }
 
@@ -272,6 +336,14 @@ function AlexRunCard({
           {run.mode === 'race' && (
             <span className="rounded-full bg-amber-500/12 border border-amber-600/20 px-2 py-0.5 text-[10px] font-medium text-amber-800">
               Race 双路并行
+            </span>
+          )}
+          {run.routeReason && (
+            <span
+              title={run.routeReason}
+              className="rounded-full bg-black/[0.04] px-2 py-0.5 text-[10px] font-medium text-[#0c0c0c]/55"
+            >
+              {run.explicitRoute ? '指定开发' : '智能路由'}
             </span>
           )}
         </div>
@@ -478,14 +550,119 @@ function IrisResearchCard({ research }: { research: ResearchOutput }) {
   );
 }
 
+function AgentReplyCard({
+  role,
+  reply,
+  options,
+  followUpQuestion,
+  routeReason,
+  explicit,
+  busy,
+  onRunSuggestion,
+}: {
+  role: 'emma' | 'iris';
+  reply: string;
+  options?: AgentReplyOption[];
+  followUpQuestion?: string;
+  routeReason?: string;
+  explicit?: boolean;
+  busy?: boolean;
+  onRunSuggestion?: (
+    instruction: string,
+    targetRole?: 'alex' | 'emma' | 'iris'
+  ) => void;
+}) {
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <AgentBadge role={role} />
+          <span className="text-xs font-semibold text-[#0c0c0c]/90">
+            {role === 'emma' ? 'Emma · 产品经理' : 'Iris · 深度调研员'}
+          </span>
+          <span
+            title={routeReason}
+            className="rounded-full bg-[#4267ff]/10 px-2 py-0.5 text-[10px] font-medium text-[#4267ff]"
+          >
+            {explicit ? '指定对话' : '智能路由'}
+          </span>
+        </div>
+      </div>
+
+      <div className="ml-2.5 pl-4 border-l border-dashed border-black/15 space-y-2.5">
+        <div className="rounded-xl border border-black/[0.08] bg-white p-3 space-y-3 shadow-[0_1px_2px_rgba(12,12,12,0.03)]">
+          {routeReason && (
+            <div className="text-[10px] text-[#0c0c0c]/45">
+              路由依据：{routeReason}
+            </div>
+          )}
+          <p className="text-xs text-[#0c0c0c]/85 leading-relaxed whitespace-pre-wrap">
+            {reply}
+          </p>
+
+          {options && options.length > 0 && (
+            <div className="space-y-2 pt-1">
+              <div className="text-[11px] font-medium text-[#0c0c0c]/55">
+                可选推进方案（点击可直接交由 Alex 实现）
+              </div>
+              <div className="space-y-1.5">
+                {options.map((opt, idx) => (
+                  <div
+                    key={`${opt.title}-${idx}`}
+                    className="rounded-xl border border-black/[0.08] bg-[#f8f8f6] p-2.5 flex items-start justify-between gap-2.5"
+                  >
+                    <div className="min-w-0 space-y-0.5">
+                      <div className="text-xs font-semibold text-[#0c0c0c]/90">
+                        {opt.title}
+                      </div>
+                      <p className="text-[11px] text-[#0c0c0c]/60 leading-relaxed">
+                        {opt.description}
+                      </p>
+                    </div>
+                    {onRunSuggestion && (
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() =>
+                          onRunSuggestion(opt.executeInstruction, 'alex')
+                        }
+                        className="shrink-0 rounded-full bg-[#4267ff] px-2.5 py-1 text-[10px] font-semibold text-white hover:bg-[#425ce1] disabled:opacity-45 disabled:cursor-not-allowed transition cursor-pointer"
+                      >
+                        交给 Alex 实现 →
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {followUpQuestion && (
+            <p className="border-t border-black/[0.06] pt-2 text-[11px] text-[#0c0c0c]/60 leading-relaxed">
+              {followUpQuestion}
+            </p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function TimelineStream({
   events,
   onOpenPreview,
   onOpenCode,
+  onRunSuggestion,
+  busy,
 }: {
   events: AgentEvent[];
   onOpenPreview: () => void;
   onOpenCode: () => void;
+  onRunSuggestion?: (
+    instruction: string,
+    targetRole?: 'alex' | 'emma' | 'iris'
+  ) => void;
+  busy?: boolean;
 }) {
   const items = buildTimelineItems(events);
   const lastAlexIdx = (() => {
@@ -533,6 +710,22 @@ export function TimelineStream({
 
         if (item.kind === 'iris_research') {
           return <IrisResearchCard key={item.key} research={item.research} />;
+        }
+
+        if (item.kind === 'agent_reply') {
+          return (
+            <AgentReplyCard
+              key={item.key}
+              role={item.role}
+              reply={item.reply}
+              options={item.options}
+              followUpQuestion={item.followUpQuestion}
+              routeReason={item.routeReason}
+              explicit={item.explicit}
+              busy={busy}
+              onRunSuggestion={onRunSuggestion}
+            />
+          );
         }
 
         if (item.kind === 'emma_plan') {

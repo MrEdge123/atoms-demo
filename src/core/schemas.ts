@@ -142,6 +142,37 @@ export const alexFilesOutputSchema = z.object({
 export type AlexFilesOutput = z.infer<typeof alexFilesOutputSchema>;
 
 /**
+ * Structured intent routing decision produced by the LLM Intent Router.
+ */
+export const intentRouteSchema = z.object({
+  targetRole: z.enum(['iris', 'emma', 'alex']),
+  intent: z.enum(['research', 'discuss', 'implement']),
+  reason: z.string().min(1).max(200),
+});
+
+export type IntentRouteOutput = z.infer<typeof intentRouteSchema>;
+
+/**
+ * Conversational reply with actionable handoff options produced by Emma or Iris.
+ */
+export const agentReplySchema = z.object({
+  reply: z.string().min(1),
+  options: z
+    .array(
+      z.object({
+        title: z.string().min(1).max(60),
+        description: z.string().min(1).max(220),
+        executeInstruction: z.string().min(1).max(400),
+      })
+    )
+    .max(4)
+    .optional(),
+  followUpQuestion: z.string().max(200).optional(),
+});
+
+export type AgentReplyOutput = z.infer<typeof agentReplySchema>;
+
+/**
  * Normalizes virtual file paths to clean POSIX relative paths (e.g. "src/App.tsx").
  * Rejects path traversal attempts.
  */

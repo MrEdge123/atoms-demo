@@ -2,10 +2,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  ATOMS_CLOUD_SDK_SOURCE,
   BUILTIN_STYLE_THEMES,
   alexFilesOutputSchema,
   buildAlexGeneratePrompt,
   buildAlexIteratePrompt,
+  getCloudSdkPromptDocs,
   getRaceDirectionsForPlan,
   renderDesignMarkdown,
 } from '@/core';
@@ -1551,5 +1553,161 @@ export default function App() {
     expect(appFile).toBeTruthy();
     expect(appFile).not.toContain('Powered by @atoms/cloud');
     expect(appFile).not.toContain('数据自主可控');
+  });
+
+  it('guards DB-only generated apps against unauthenticated { mine: true } / update calls and enforces graceful guest fallback', () => {
+    expect(ATOMS_CLOUD_SDK_SOURCE).toContain('if (filter?.mine && !readToken())');
+
+    const dbOnlyDocs = getCloudSdkPromptDocs(['db']);
+    expect(dbOnlyDocs).toContain('DO NOT pass { mine: true }');
+    expect(dbOnlyDocs).toContain('require a logged-in auth token');
+
+    const fullDocs = getCloudSdkPromptDocs(['db', 'auth']);
+    expect(fullDocs).toContain('{ mine: true } requires a logged-in user');
+    expect(fullDocs).toContain('public views such as leaderboards');
+
+    const dbOnlyPlan = {
+      appName: '跳跳像素',
+      summary: '复古像素横版跳跃小游戏',
+      targetUsers: '休闲玩家',
+      capabilities: ['db'] as Array<'db' | 'auth' | 'billing' | 'ai'>,
+      pages: [{ name: 'Game', purpose: '试玩与排行榜' }],
+      collections: [
+        { name: 'scores', fields: ['score'], description: '玩家得分记录' },
+      ],
+    };
+
+    const gen = buildAlexGeneratePrompt({ plan: dbOnlyPlan });
+    const iter = buildAlexIteratePrompt({
+      plan: dbOnlyPlan,
+      files: { 'src/App.tsx': 'export default function App() { return <div />; }' },
+      instruction: '优化界面',
+    });
+
+    expect(gen.system).toContain('degrade gracefully');
+    expect(iter.system).toContain('degrade gracefully');
+  });
+
+  it('uses the LLM intent router to dispatch open product/research prompts to Emma/Iris without touching code and sends actionable edits to Alex', async () => {
+    const repo = new MemoryProjectRepository();
+    const baseMock = new MockLLMProvider();
+    const llmCalls: string[] = [];
+
+    const spyLlm: LLMProvider = {
+      listModels: () => baseMock.listModels(),
+      generateObject: async (input) => {
+        const tag = input.system.startsWith('You are the Intent Router')
+          ? 'router'
+          : input.system.startsWith('You are Emma, discussing')
+            ? 'emma_discuss'
+            : input.system.startsWith('You are Iris, answering')
+              ? 'iris_discuss'
+              : input.system.startsWith('You are Alex')
+                ? 'alex'
+                : 'other';
+        llmCalls.push(tag);
+        return baseMock.generateObject(input);
+      },
+      streamText: (input) => baseMock.streamText(input),
+    };
+
+    const workflow = new AtomsWorkflowEngine({
+      repo,
+      llm: spyLlm,
+      builder: new EsbuildStaticBuilder(),
+      publisher: new SameOriginSitePublisher(repo, 'http://localhost:3000'),
+      apiBaseUrl: 'http://localhost:3000',
+    });
+
+    const project = await repo.create({
+      title: '跳跳像素',
+      slug: 'mario-intent-test',
+    });
+    await collect(
+      workflow.start(project.id, '帮我做一个马里奥的跳跃小游戏', {
+        model: 'mock-fast',
+      })
+    );
+    await collect(
+      workflow.confirmPlan(project.id, { mode: 'linear', model: 'mock-fast' })
+    );
+
+    const beforeDiscuss = await repo.getById(project.id);
+    const initialAppTsx = beforeDiscuss?.draftFiles['src/App.tsx'];
+    expect(initialAppTsx).toBeTruthy();
+
+    // 1. Open-ended color/style discussion -> LLM router routes to Emma, files untouched
+    llmCalls.length = 0;
+    const emmaEvents = await collect(
+      workflow.iterate(project.id, '我想改配色', { model: 'mock-fast' })
+    );
+    expect(llmCalls).toEqual(['router', 'emma_discuss']);
+    const emmaRouteEv = emmaEvents.find((ev) => ev.type === 'intent_routed');
+    expect((emmaRouteEv?.payload as { targetRole?: string }).targetRole).toBe(
+      'emma'
+    );
+    const emmaMsgEv = emmaEvents.find((ev) => ev.type === 'agent_message');
+    expect(emmaMsgEv?.role).toBe('emma');
+    const emmaOptions = (
+      emmaMsgEv?.payload as { options?: Array<{ executeInstruction: string }> }
+    ).options;
+    expect(Array.isArray(emmaOptions) && emmaOptions.length >= 2).toBe(true);
+
+    const afterEmma = await repo.getById(project.id);
+    expect(afterEmma?.status).toBe('ready');
+    expect(afterEmma?.draftFiles['src/App.tsx']).toBe(initialAppTsx);
+
+    // 2. Research question -> LLM router routes to Iris, files untouched
+    llmCalls.length = 0;
+    const irisEvents = await collect(
+      workflow.iterate(project.id, '帮我调研一下同类产品的留存机制', {
+        model: 'mock-fast',
+      })
+    );
+    expect(llmCalls).toEqual(['router', 'iris_discuss']);
+    const irisRouteEv = irisEvents.find((ev) => ev.type === 'intent_routed');
+    expect((irisRouteEv?.payload as { targetRole?: string }).targetRole).toBe(
+      'iris'
+    );
+    expect(
+      irisEvents.some((ev) => ev.type === 'agent_message' && ev.role === 'iris')
+    ).toBe(true);
+    expect((await repo.getById(project.id))?.draftFiles['src/App.tsx']).toBe(
+      initialAppTsx
+    );
+
+    // 3. Explicit targetRole or @Emma bypasses router and directly asks Emma
+    llmCalls.length = 0;
+    const explicitEvents = await collect(
+      workflow.iterate(project.id, '@Emma 按钮和背景该怎么搭配更和谐？', {
+        model: 'mock-fast',
+      })
+    );
+    expect(llmCalls).toEqual(['emma_discuss']);
+    expect(
+      (
+        explicitEvents.find((ev) => ev.type === 'intent_routed')?.payload as {
+          explicit?: boolean;
+          targetRole?: string;
+        }
+      )?.explicit
+    ).toBe(true);
+
+    // 4. Concrete modification instruction -> LLM router routes to Alex & updates code
+    llmCalls.length = 0;
+    const alexEvents = await collect(
+      workflow.iterate(project.id, '把主色调改成深蓝色', {
+        model: 'mock-fast',
+      })
+    );
+    expect(llmCalls[0]).toBe('router');
+    expect(llmCalls).toContain('alex');
+    const alexRouteEv = alexEvents.find((ev) => ev.type === 'intent_routed');
+    expect((alexRouteEv?.payload as { targetRole?: string }).targetRole).toBe(
+      'alex'
+    );
+    expect(
+      (await repo.getById(project.id))?.draftFiles['src/App.tsx']
+    ).toContain('bg-blue-800');
   });
 });

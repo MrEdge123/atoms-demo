@@ -33,6 +33,7 @@ export async function POST(
   const body = (await req.json().catch(() => ({}))) as {
     instruction?: string;
     model?: string;
+    targetRole?: string;
   };
   const instruction = body.instruction?.trim();
   if (!instruction) {
@@ -40,6 +41,22 @@ export async function POST(
       { error: 'instruction is required' },
       { status: 400 }
     );
+  }
+
+  let targetRole: 'auto' | 'iris' | 'emma' | 'alex' | undefined;
+  if (body.targetRole !== undefined) {
+    if (
+      body.targetRole !== 'auto' &&
+      body.targetRole !== 'iris' &&
+      body.targetRole !== 'emma' &&
+      body.targetRole !== 'alex'
+    ) {
+      return NextResponse.json(
+        { error: 'targetRole must be one of auto, iris, emma, alex' },
+        { status: 400 }
+      );
+    }
+    targetRole = body.targetRole;
   }
 
   const blockReason = getMutationBlockReason(project, 'iterate');
@@ -55,7 +72,11 @@ export async function POST(
 
   return createSseResponse(
     (signal) =>
-      c.workflow.iterate(id, instruction, { model: body.model, signal }),
+      c.workflow.iterate(id, instruction, {
+        model: body.model,
+        targetRole,
+        signal,
+      }),
     req
   );
 }

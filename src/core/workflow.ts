@@ -20,7 +20,10 @@ import {
   buildAlexFixPrompt,
   buildAlexGeneratePrompt,
   buildAlexIteratePrompt,
+  buildEmmaDiscussPrompt,
   buildEmmaPrompt,
+  buildIntentRouterPrompt,
+  buildIrisDiscussPrompt,
   buildIrisPrompt,
 } from './roles';
 import {
@@ -30,7 +33,9 @@ import {
 } from './design-guide';
 import { applyThemeToDesignSystem } from './style-presets';
 import {
+  agentReplySchema,
   alexFilesOutputSchema,
+  intentRouteSchema,
   mergeVirtualFS,
   productPlanSchema,
   researchOutputSchema,
@@ -57,6 +62,69 @@ export interface WorkflowEngineDeps {
  */
 function formatLogLabel(value: unknown, fallback = 'default'): string {
   return typeof value === 'string' && value.trim() ? value.trim() : fallback;
+}
+
+function parseExplicitMention(raw: string): {
+  role: 'iris' | 'emma' | 'alex' | null;
+  cleanedText: string;
+} {
+  const trimmed = raw.trim();
+  const match = trimmed.match(
+    /^@(iris|emma|alex|产品经理|产品|调研员|调研|全栈工程师|全栈|开发)(?:[\s:：,，-]+(.*)|$)/is
+  );
+  if (!match) {
+    return { role: null, cleanedText: trimmed };
+  }
+  const token = match[1].toLowerCase();
+  const rest = (match[2] ?? '').trim() || trimmed;
+  if (token === 'iris' || token.startsWith('调研')) {
+    return { role: 'iris', cleanedText: rest };
+  }
+  if (token === 'emma' || token.startsWith('产品')) {
+    return { role: 'emma', cleanedText: rest };
+  }
+  return { role: 'alex', cleanedText: rest };
+}
+
+function formatRecentConversationContext(events: AgentEvent[]): string {
+  const lines: string[] = [];
+  for (const ev of events) {
+    const payload = (ev.payload ?? {}) as Record<string, unknown>;
+    if (ev.type === 'role_start') {
+      const msg =
+        typeof payload.instruction === 'string'
+          ? payload.instruction
+          : typeof payload.idea === 'string'
+            ? payload.idea
+            : '';
+      if (msg.trim()) {
+        lines.push(`User: ${msg.trim()}`);
+      }
+    } else if (ev.type === 'agent_message' && typeof payload.reply === 'string') {
+      const speaker = ev.role === 'iris' ? 'Iris' : 'Emma';
+      const optTitles = Array.isArray(payload.options)
+        ? (payload.options as Array<{ title?: string; executeInstruction?: string }>)
+            .map((o, idx) =>
+              o.title ? `${idx + 1}. ${o.title}${o.executeInstruction ? ` (${o.executeInstruction})` : ''}` : ''
+            )
+            .filter(Boolean)
+            .join('; ')
+        : '';
+      lines.push(
+        `${speaker}: ${payload.reply.trim()}${optTitles ? ` [Options: ${optTitles}]` : ''}`
+      );
+    } else if (ev.role === 'emma' && ev.type === 'plan_ready') {
+      const appName = typeof payload.appName === 'string' ? payload.appName : '';
+      const summary = typeof payload.summary === 'string' ? payload.summary : '';
+      if (appName || summary) {
+        lines.push(`Emma Plan: ${appName} — ${summary}`);
+      }
+    } else if (ev.role === 'alex' && ev.type === 'thought' && typeof payload.message === 'string') {
+      lines.push(`Alex: ${payload.message.trim()}`);
+    }
+  }
+  const recent = lines.slice(-6).join('\n');
+  return recent.length > 2400 ? recent.slice(recent.length - 2400) : recent;
 }
 
 export class AtomsWorkflowEngine implements WorkflowEngine {
@@ -585,7 +653,11 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
   async *iterate(
     projectId: string,
     instruction: string,
-    opts?: { model?: string; signal?: AbortSignal }
+    opts?: {
+      model?: string;
+      targetRole?: 'auto' | 'iris' | 'emma' | 'alex';
+      signal?: AbortSignal;
+    }
   ): AsyncIterable<AgentEvent> {
     const runToken = this.acquireProjectLock(projectId);
     const started = Date.now();
@@ -593,6 +665,7 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
     let completed = false;
     let statusDirty = false;
     let rollbackFiles: VirtualFS = {};
+    let restoreStatus: Project['status'] = 'ready';
 
     try {
       const project = await this.requireProject(projectId);
@@ -607,17 +680,185 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
         throw new Error(`Project "${projectId}" has no draft files to iterate on`);
       }
 
+      const rawInstruction = instruction.trim();
+      const previousStatus = project.status;
+      restoreStatus =
+        previousStatus === 'published' || previousStatus === 'error'
+          ? previousStatus
+          : 'ready';
       rollbackFiles = project.draftFiles;
-      const getSeq = await this.nextSeq(projectId);
+
+      const existingEvents = await this.repo.listEvents(projectId);
+      let seq = existingEvents.length;
+      const getSeq = () => {
+        seq += 1;
+        return seq;
+      };
+      const recentContext = formatRecentConversationContext(existingEvents);
+
+      const mention = parseExplicitMention(rawInstruction);
+      const explicitArgRole =
+        opts?.targetRole && opts.targetRole !== 'auto' ? opts.targetRole : null;
+
+      let routed: {
+        targetRole: 'iris' | 'emma' | 'alex';
+        intent: 'research' | 'discuss' | 'implement';
+        reason: string;
+        explicit: boolean;
+      };
+      let cleanInstruction = rawInstruction;
+
+      if (explicitArgRole) {
+        cleanInstruction = mention.role ? mention.cleanedText : rawInstruction;
+        routed = {
+          targetRole: explicitArgRole,
+          intent:
+            explicitArgRole === 'iris'
+              ? 'research'
+              : explicitArgRole === 'emma'
+                ? 'discuss'
+                : 'implement',
+          reason: '用户已手动指定协作智能体',
+          explicit: true,
+        };
+      } else if (mention.role) {
+        cleanInstruction = mention.cleanedText;
+        routed = {
+          targetRole: mention.role,
+          intent:
+            mention.role === 'iris'
+              ? 'research'
+              : mention.role === 'emma'
+                ? 'discuss'
+                : 'implement',
+          reason: `用户通过 @ 提及指定 ${mention.role}`,
+          explicit: true,
+        };
+      } else {
+        const ds = project.plan.designSystem;
+        const designSummary = ds
+          ? `场景 ${ds.scenario} ${ds.scenarioName}（${ds.colorMode}），主色 ${ds.palette.accent}，背景 ${ds.palette.background}${ds.themeName ? `，主题「${ds.themeName}」` : ''}`
+          : undefined;
+        try {
+          const decision = await this.llm.generateObject({
+            ...buildIntentRouterPrompt({
+              plan: project.plan,
+              designSummary,
+              recentContext,
+              message: rawInstruction,
+            }),
+            schema: intentRouteSchema,
+            model: opts?.model,
+            abortSignal: opts?.signal,
+          });
+          routed = {
+            targetRole: decision.targetRole,
+            intent: decision.intent,
+            reason: decision.reason,
+            explicit: false,
+          };
+        } catch (routerErr) {
+          if (opts?.signal?.aborted) {
+            throw routerErr;
+          }
+          const routerMsg =
+            routerErr instanceof Error ? routerErr.message : String(routerErr);
+          console.warn(
+            `[Workflow] intent router failed project=${projectId} model=${modelLabel}, defaulting to alex: ${routerMsg}`
+          );
+          routed = {
+            targetRole: 'alex',
+            intent: 'implement',
+            reason: '意图分析暂不可用，已转交全栈工程师',
+            explicit: false,
+          };
+        }
+      }
+
+      console.log(
+        `[Workflow] iterate routed project=${projectId} role=${routed.targetRole} intent=${routed.intent} explicit=${routed.explicit} model=${modelLabel}`
+      );
+
+      const startLabel =
+        routed.targetRole === 'emma'
+          ? 'Emma 正在梳理产品与视觉建议...'
+          : routed.targetRole === 'iris'
+            ? 'Iris 正在进行深入调研分析...'
+            : 'Alex 正在按指令迭代改版...';
+
+      yield await this.emitAndPersist(projectId, getSeq, {
+        role: routed.targetRole,
+        type: 'role_start',
+        payload: {
+          label: startLabel,
+          instruction: rawInstruction,
+          targetRole: routed.targetRole,
+          intent: routed.intent,
+          routeReason: routed.reason,
+          explicit: routed.explicit,
+        },
+      });
+
+      yield await this.emitAndPersist(projectId, getSeq, {
+        role: 'system',
+        type: 'intent_routed',
+        payload: {
+          targetRole: routed.targetRole,
+          intent: routed.intent,
+          reason: routed.reason,
+          explicit: routed.explicit,
+        },
+      });
+
+      if (routed.targetRole === 'emma' || routed.targetRole === 'iris') {
+        const discussPrompt =
+          routed.targetRole === 'emma'
+            ? buildEmmaDiscussPrompt({
+                plan: project.plan,
+                designMd: rollbackFiles['DESIGN.md'],
+                recentContext,
+                message: cleanInstruction,
+              })
+            : buildIrisDiscussPrompt({
+                plan: project.plan,
+                recentContext,
+                message: cleanInstruction,
+              });
+
+        const replyOut = await this.llm.generateObject({
+          ...discussPrompt,
+          schema: agentReplySchema,
+          model: opts?.model,
+          abortSignal: opts?.signal,
+        });
+
+        yield await this.emitAndPersist(projectId, getSeq, {
+          role: routed.targetRole,
+          type: 'agent_message',
+          payload: {
+            ...replyOut,
+            routeReason: routed.reason,
+            intent: routed.intent,
+            explicit: routed.explicit,
+          },
+        });
+
+        completed = true;
+        console.log(
+          `[Workflow] iterate discussion done project=${projectId} role=${routed.targetRole} elapsed=${Date.now() - started}ms`
+        );
+
+        yield await this.emitAndPersist(projectId, getSeq, {
+          role: 'system',
+          type: 'done',
+          payload: { status: previousStatus, routedRole: routed.targetRole },
+        });
+        return;
+      }
+
       console.log(`[Workflow] iterate begin project=${projectId} model=${modelLabel}`);
       await this.repo.saveDraft(projectId, rollbackFiles, 'building');
       statusDirty = true;
-
-      yield await this.emitAndPersist(projectId, getSeq, {
-        role: 'alex',
-        type: 'role_start',
-        payload: { label: 'Alex 正在按指令迭代改版...', instruction },
-      });
 
       const buffered: Array<{
         role: AgentRole;
@@ -633,7 +874,8 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
         initialPrompt: buildAlexIteratePrompt({
           plan: project.plan,
           files: rollbackFiles,
-          instruction,
+          instruction: cleanInstruction,
+          recentContext,
         }),
         model: opts?.model,
         abortSignal: opts?.signal,
@@ -661,7 +903,7 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
       yield await this.emitAndPersist(projectId, getSeq, {
         role: 'system',
         type: 'done',
-        payload: { status: nextStatus },
+        payload: { status: nextStatus, routedRole: 'alex' },
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -676,7 +918,7 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
           `[Workflow] iterate aborted project=${projectId} model=${modelLabel} elapsed=${Date.now() - started}ms`
         );
         await this.repo
-          .saveDraft(projectId, rollbackFiles, 'ready')
+          .saveDraft(projectId, rollbackFiles, restoreStatus)
           .catch(() => undefined);
       }
     }

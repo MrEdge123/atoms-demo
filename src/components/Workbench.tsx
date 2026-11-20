@@ -214,6 +214,9 @@ export function Workbench() {
     timestamp: string;
   } | null>(null);
   const [confirmedPlanExpanded, setConfirmedPlanExpanded] = useState(false);
+  const [targetAgent, setTargetAgent] = useState<
+    'auto' | 'emma' | 'iris' | 'alex'
+  >('auto');
 
   const [customThemes, setCustomThemes] = useState<StyleThemeSpec[]>([]);
   const [selectedThemeId, setSelectedThemeId] = useState<string>('auto');
@@ -611,6 +614,7 @@ export function Workbench() {
     setComposerText('');
     setOptimisticPrompt(null);
     setConfirmedPlanExpanded(false);
+    setTargetAgent('auto');
     activeIdRef.current = projectId;
     hasAcceptedSnapshotRef.current = false;
     setActiveId(projectId);
@@ -665,6 +669,7 @@ export function Workbench() {
     setComposerText('');
     setOptimisticPrompt(null);
     setConfirmedPlanExpanded(false);
+    setTargetAgent('auto');
     try {
       const created = await createNewProject();
       setSnapshot(null);
@@ -766,6 +771,7 @@ export function Workbench() {
       }
       setOptimisticPrompt(null);
       setConfirmedPlanExpanded(false);
+      setTargetAgent('auto');
       hasAcceptedSnapshotRef.current = true;
       setSnapshot({
         project: created,
@@ -888,11 +894,15 @@ export function Workbench() {
 
   async function handleIterate(
     customInstruction?: string,
-    opts?: { clearComposer?: boolean }
+    opts?: {
+      clearComposer?: boolean;
+      targetRole?: 'auto' | 'iris' | 'emma' | 'alex';
+    }
   ) {
     const instruction = (customInstruction ?? composerText).trim();
     if (!activeId || !instruction || iterateBlockReason || busyAction) return;
     const targetId = activeId;
+    const resolvedTarget = opts?.targetRole ?? targetAgent;
     const shouldClearComposer =
       opts?.clearComposer ?? customInstruction === undefined;
     if (shouldClearComposer) {
@@ -906,9 +916,18 @@ export function Workbench() {
       text: instruction,
       timestamp: new Date().toISOString(),
     });
-    setBusyAction('Alex 正在按指令迭代修改...');
+    setBusyAction(
+      resolvedTarget === 'emma'
+        ? 'Emma 正在梳理产品与视觉建议...'
+        : resolvedTarget === 'iris'
+          ? 'Iris 正在开展调研分析...'
+          : resolvedTarget === 'alex'
+            ? 'Alex 正在按指令迭代修改...'
+            : '正在分析意图并分配智能体...'
+    );
     let streamError = '';
     let sawRoleStart = false;
+    let routedToAlex = resolvedTarget === 'alex';
     const isCurrentProject = () =>
       !activeIdRef.current || activeIdRef.current === targetId;
     try {
@@ -918,6 +937,7 @@ export function Workbench() {
         body: JSON.stringify({
           instruction,
           model: selectedModel || undefined,
+          targetRole: resolvedTarget,
         }),
       });
       await readSseStream(res, (ev) => {
@@ -926,6 +946,22 @@ export function Workbench() {
           setOptimisticPrompt((cur) =>
             cur?.projectId === targetId ? null : cur
           );
+          if (ev.role === 'emma') {
+            routedToAlex = false;
+            if (isCurrentProject()) {
+              setBusyAction('Emma 正在梳理产品与视觉建议...');
+            }
+          } else if (ev.role === 'iris') {
+            routedToAlex = false;
+            if (isCurrentProject()) {
+              setBusyAction('Iris 正在开展调研分析...');
+            }
+          } else if (ev.role === 'alex') {
+            routedToAlex = true;
+            if (isCurrentProject()) {
+              setBusyAction('Alex 正在按指令迭代修改...');
+            }
+          }
         }
         if (isCurrentProject()) {
           setEvents((prev) => [...prev, ev]);
@@ -939,7 +975,9 @@ export function Workbench() {
         if (streamError) {
           setErrorMsg(streamError);
         }
-        setRightTab('preview');
+        if (routedToAlex) {
+          setRightTab('preview');
+        }
       }
     } catch (err) {
       if (!sawRoleStart && shouldClearComposer && isCurrentProject()) {
@@ -1074,6 +1112,7 @@ export function Workbench() {
         setEditablePlan(null);
         setOptimisticPrompt(null);
         setConfirmedPlanExpanded(false);
+        setTargetAgent('auto');
         setSelectedFile('');
         setIsEditingCode(false);
         setCodeSaveBanner(null);
@@ -1176,6 +1215,7 @@ export function Workbench() {
     setConfirmDeleteProjectId(null);
     setOptimisticPrompt(null);
     setConfirmedPlanExpanded(false);
+    setTargetAgent('auto');
     setIsEditingCode(false);
     setCodeSaveBanner(null);
     setCodeCompileErrors([]);
@@ -1979,7 +2019,9 @@ export function Workbench() {
                   disabled={isMutationLocked || Boolean(busyAction)}
                   title={iterateBlockReason ?? undefined}
                   onClick={() =>
-                    void handleIterate(`修复页面运行时错误：${runtimeError}`)
+                    void handleIterate(`修复页面运行时错误：${runtimeError}`, {
+                      targetRole: 'alex',
+                    })
                   }
                   className="inline-flex items-center gap-1 rounded-full bg-[#0c0c0c] px-3 py-1 text-[11px] font-medium text-white hover:bg-[#0c0c0c]/85 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
                 >
@@ -2019,6 +2061,13 @@ export function Workbench() {
               events={events}
               onOpenPreview={() => setRightTab('preview')}
               onOpenCode={() => setRightTab('code')}
+              onRunSuggestion={(inst, role) =>
+                void handleIterate(inst, {
+                  clearComposer: false,
+                  targetRole: role ?? 'alex',
+                })
+              }
+              busy={Boolean(busyAction)}
             />
 
             {optimisticPrompt && optimisticPrompt.projectId === activeId && (
@@ -2044,17 +2093,19 @@ export function Workbench() {
             {/* Quick Suggestion Chips */}
             {effectiveComposerMode === 'iterate' && (
               <div className="flex flex-wrap gap-1.5">
-                {['主色调改成深蓝色', '增加导出 CSV 按钮'].map((chip) => (
-                  <button
-                    key={chip}
-                    type="button"
-                    disabled={isMutationLocked || Boolean(busyAction)}
-                    onClick={() => setComposerText(chip)}
-                    className="rounded-full border border-black/[0.08] bg-white px-2.5 py-1 text-[11px] font-medium text-[#0c0c0c]/75 hover:border-[#4267ff]/40 hover:text-[#4267ff] transition disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
-                  >
-                    + {chip}
-                  </button>
-                ))}
+                {['我想改配色', '主色调改成深蓝色', '增加导出 CSV 按钮'].map(
+                  (chip) => (
+                    <button
+                      key={chip}
+                      type="button"
+                      disabled={isMutationLocked || Boolean(busyAction)}
+                      onClick={() => setComposerText(chip)}
+                      className="rounded-full border border-black/[0.08] bg-white px-2.5 py-1 text-[11px] font-medium text-[#0c0c0c]/75 hover:border-[#4267ff]/40 hover:text-[#4267ff] transition disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                    >
+                      + {chip}
+                    </button>
+                  )
+                )}
               </div>
             )}
 
@@ -2070,6 +2121,39 @@ export function Workbench() {
                   {hasPendingPlanConfirmation
                     ? '当前存在待确认的新方案，请先在上方 Emma 方案确认卡中点击「确认方案并让 Alex 开始构建」；确认前已有草稿与已发布线上站点保持不变，无法迭代或发布。'
                     : iterateBlockReason}
+                </div>
+              )}
+
+              {effectiveComposerMode === 'iterate' && !iterateBlockReason && (
+                <div className="flex flex-wrap items-center gap-1 border-b border-black/[0.06] px-3 py-1.5 bg-[#fcfcfb]">
+                  <span className="text-[10px] font-medium text-[#0c0c0c]/45 mr-0.5">
+                    对话对象:
+                  </span>
+                  {(
+                    [
+                      { id: 'auto', label: '智能路由' },
+                      { id: 'emma', label: 'Emma 产品' },
+                      { id: 'iris', label: 'Iris 调研' },
+                      { id: 'alex', label: 'Alex 开发' },
+                    ] as const
+                  ).map((agent) => {
+                    const selected = targetAgent === agent.id;
+                    return (
+                      <button
+                        key={agent.id}
+                        type="button"
+                        disabled={composerLocked}
+                        onClick={() => setTargetAgent(agent.id)}
+                        className={`rounded-full px-2 py-0.5 text-[10px] font-medium transition cursor-pointer disabled:opacity-45 ${
+                          selected
+                            ? 'bg-[#4267ff] text-white shadow-xs'
+                            : 'bg-black/[0.04] text-[#0c0c0c]/65 hover:text-[#0c0c0c]'
+                        }`}
+                      >
+                        {agent.label}
+                      </button>
+                    );
+                  })}
                 </div>
               )}
 
@@ -2098,7 +2182,13 @@ export function Workbench() {
                           ? '请先在右侧选择一个 Race Mode 候选方案...'
                           : isBuilding
                             ? 'Alex 正在构建中，请稍候...'
-                            : '继续向 AI 团队描述调整需求（不影响已发布线上版本）...'
+                            : targetAgent === 'emma'
+                              ? '和 Emma 探讨产品方案、交互体验或配色建议...'
+                              : targetAgent === 'iris'
+                                ? '向 Iris 提问市场需求、竞品做法或用户留存建议...'
+                                : targetAgent === 'alex'
+                                  ? '直接向 Alex 下达具体改代码指令（不影响已发布线上版本）...'
+                                  : '输入想法讨论或具体修改需求（自动判断交由 Iris 调研 / Emma 讨论 / Alex 改代码）...'
                   }
                   className="w-full resize-none bg-transparent text-xs leading-relaxed text-[#0c0c0c]/95 placeholder:text-[#0c0c0c]/35 focus:outline-none disabled:opacity-50"
                 />
@@ -2142,7 +2232,7 @@ export function Workbench() {
                     aria-label={
                       effectiveComposerMode === 'restart'
                         ? '启动 AI 团队规划'
-                        : '发送迭代指令'
+                        : '发送对话或迭代指令'
                     }
                     title={
                       effectiveComposerMode === 'iterate'
@@ -2155,7 +2245,7 @@ export function Workbench() {
                     {effectiveComposerMode === 'restart' ? (
                       <span>启动规划</span>
                     ) : (
-                      <span>迭代</span>
+                      <span>{targetAgent === 'alex' ? '迭代' : '发送'}</span>
                     )}
                     <ArrowUp className="w-3.5 h-3.5" />
                   </button>
