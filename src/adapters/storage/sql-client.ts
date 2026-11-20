@@ -127,29 +127,43 @@ export class PGliteSqlClient implements SqlClient {
  */
 export class NodePgSqlClient implements SqlClient {
   private readonly pool: Pool;
-  private readonly ready: Promise<void>;
+  private readyPromise: Promise<void> | null = null;
 
   constructor(connectionString: string) {
     this.pool = new Pool({ connectionString });
-    this.ready = this.pool.query(SCHEMA_SQL).then(() => undefined);
+  }
+
+  private ensureReady(): Promise<void> {
+    if (!this.readyPromise) {
+      this.readyPromise = this.pool
+        .query(SCHEMA_SQL)
+        .then(() => undefined)
+        .catch((err) => {
+          this.readyPromise = null;
+          throw err;
+        });
+    }
+    return this.readyPromise;
   }
 
   async query<T = Record<string, unknown>>(
     sql: string,
     params: unknown[] = []
   ): Promise<{ rows: T[] }> {
-    await this.ready;
+    await this.ensureReady();
     const res = await this.pool.query(sql, params);
     return { rows: res.rows as T[] };
   }
 
   async exec(sql: string): Promise<void> {
-    await this.ready;
+    await this.ensureReady();
     await this.pool.query(sql);
   }
 
   async close(): Promise<void> {
-    await this.ready;
+    if (this.readyPromise) {
+      await this.readyPromise.catch(() => undefined);
+    }
     await this.pool.end();
   }
 }

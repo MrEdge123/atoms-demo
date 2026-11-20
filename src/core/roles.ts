@@ -72,7 +72,8 @@ STRICT RULES:
 4. Use Tailwind CSS utility classes directly. Make the UI polished, responsive (mobile + desktop), and genuinely interactive with loading/error feedback.
 5. Persist real user data with @atoms/cloud instead of fake in-memory arrays:
 
-${sdkDocs}`,
+${sdkDocs}
+6. Return strictly valid JSON matching { "summary": string, "files": Array<{ "path": string, "content": string }> } (with optional "deletes").`,
     prompt: `Build the application described by this confirmed ProductPlan:
 ${JSON.stringify(input.plan, null, 2)}
 
@@ -92,6 +93,7 @@ export function buildAlexFixPrompt(input: {
     system: `You are Alex, fixing build/runtime errors in an Atoms React + TypeScript application.
 Return only the modified/repaired files (keep "src/App.tsx" valid with a default export).
 Allowed packages ONLY: "react", "react-dom", "lucide-react", "clsx", "tailwind-merge", "@atoms/cloud".
+Return strictly valid JSON matching { "summary": string, "files": Array<{ "path": string, "content": string }> }.
 
 ${sdkDocs}`,
     prompt: `Product Plan:
@@ -117,6 +119,7 @@ export function buildAlexIteratePrompt(input: {
     system: `You are Alex, iterating on an existing Atoms React + TypeScript application.
 Preserve existing @atoms/cloud collection names and data shapes so previously stored user records remain compatible!
 Allowed packages ONLY: "react", "react-dom", "lucide-react", "clsx", "tailwind-merge", "@atoms/cloud".
+Return strictly valid JSON matching { "summary": string, "files": Array<{ "path": string, "content": string }> }.
 
 ${sdkDocs}`,
     prompt: `Product Plan:

@@ -34,29 +34,60 @@ export function createSseResponse(
   iterable: AsyncIterable<AgentEvent>
 ): Response {
   const encoder = new TextEncoder();
+  let heartbeat: ReturnType<typeof setInterval> | null = null;
+  let closed = false;
+
+  const stopHeartbeat = () => {
+    closed = true;
+    if (heartbeat) {
+      clearInterval(heartbeat);
+      heartbeat = null;
+    }
+  };
+
   const stream = new ReadableStream({
     async start(controller) {
+      heartbeat = setInterval(() => {
+        if (closed) return;
+        try {
+          controller.enqueue(encoder.encode(': keepalive\n\n'));
+        } catch {
+          stopHeartbeat();
+        }
+      }, 15000);
+
       try {
         for await (const event of iterable) {
+          if (closed) break;
           controller.enqueue(
             encoder.encode(`data: ${JSON.stringify(event)}\n\n`)
           );
         }
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        const errorEvent: AgentEvent = {
-          seq: 9999,
-          role: 'system',
-          type: 'error',
-          payload: { message },
-          timestamp: new Date().toISOString(),
-        };
-        controller.enqueue(
-          encoder.encode(`data: ${JSON.stringify(errorEvent)}\n\n`)
-        );
+        if (!closed) {
+          const message = err instanceof Error ? err.message : String(err);
+          const errorEvent: AgentEvent = {
+            seq: 9999,
+            role: 'system',
+            type: 'error',
+            payload: { message },
+            timestamp: new Date().toISOString(),
+          };
+          controller.enqueue(
+            encoder.encode(`data: ${JSON.stringify(errorEvent)}\n\n`)
+          );
+        }
       } finally {
-        controller.close();
+        stopHeartbeat();
+        try {
+          controller.close();
+        } catch {
+          // Stream may already be closed or cancelled
+        }
       }
+    },
+    cancel() {
+      stopHeartbeat();
     },
   });
 
@@ -65,6 +96,7 @@ export function createSseResponse(
       'Content-Type': 'text/event-stream; charset=utf-8',
       'Cache-Control': 'no-cache, no-transform',
       Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
     },
   });
 }

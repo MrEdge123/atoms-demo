@@ -173,6 +173,7 @@ export class VercelAISDKProvider implements LLMProvider {
               system: input.system,
               prompt: input.prompt,
               schema: zodSchema,
+              maxTokens: 8192,
             })
           : await generateObject({
               model,
@@ -181,6 +182,7 @@ export class VercelAISDKProvider implements LLMProvider {
               schema: zodSchema,
               mode: 'json',
               temperature,
+              maxTokens: 8192,
             });
       return res.object;
     } catch (primaryErr) {
@@ -191,6 +193,7 @@ export class VercelAISDKProvider implements LLMProvider {
         system: `${input.system}\n\nIMPORTANT: Return ONLY a valid raw JSON object that conforms strictly to the requested structure. Do not include markdown fences or any prose outside JSON.`,
         prompt: input.prompt,
         temperature,
+        maxTokens: 8192,
       });
 
       const jsonText = extractJsonObjectText(fallback.text);

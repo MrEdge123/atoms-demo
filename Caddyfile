@@ -1,0 +1,9 @@
+{$SITE_DOMAIN:xcodea.online} {
+    reverse_proxy app:3000 {
+        flush_interval -1
+    }
+}
+
+www.{$SITE_DOMAIN:xcodea.online} {
+    redir https://{$SITE_DOMAIN:xcodea.online}{uri} permanent
+}

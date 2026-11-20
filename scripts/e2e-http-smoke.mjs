@@ -6,11 +6,17 @@ import path from 'node:path';
 
 import { fileURLToPath } from 'node:url';
 
+const EXTERNAL_URL = (process.argv[2] || process.env.SMOKE_BASE_URL || '')
+  .trim()
+  .replace(/\/$/, '');
 const PORT = 3105;
-const BASE_URL = `http://127.0.0.1:${PORT}`;
+const BASE_URL = EXTERNAL_URL || `http://127.0.0.1:${PORT}`;
+const SUFFIX = EXTERNAL_URL ? `-${Date.now().toString(36).slice(-5)}` : '';
 const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const TEMP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'atoms-e2e-http-'));
-const PGLITE_DIR = path.join(TEMP_DIR, 'pglite');
+const TEMP_DIR = EXTERNAL_URL
+  ? null
+  : fs.mkdtempSync(path.join(os.tmpdir(), 'atoms-e2e-http-'));
+const PGLITE_DIR = TEMP_DIR ? path.join(TEMP_DIR, 'pglite') : null;
 
 async function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -20,7 +26,7 @@ async function waitForServer(child, getLogs, timeoutMs = 25000) {
   const deadline = Date.now() + timeoutMs;
   let lastErr = '';
   while (Date.now() < deadline) {
-    if (child.exitCode !== null) {
+    if (child && child.exitCode !== null) {
       throw new Error(
         `next start exited early with code ${child.exitCode}\n${getLogs()}`
       );
@@ -53,37 +59,46 @@ async function readSseEvents(res) {
 }
 
 async function main() {
-  const nextBin = path.join(ROOT_DIR, 'node_modules', 'next', 'dist', 'bin', 'next');
-  const child = spawn(process.execPath, [nextBin, 'start', '-p', String(PORT), '-H', '127.0.0.1'], {
-    cwd: ROOT_DIR,
-    env: {
-      ...process.env,
-      PORT: String(PORT),
-      APP_BASE_URL: BASE_URL,
-      LLM_ADAPTER: 'mock',
-      BUILDER_ADAPTER: 'esbuild',
-      STORAGE_ADAPTER: 'pglite',
-      PGLITE_DATA_DIR: PGLITE_DIR,
-      PUBLISHER_ADAPTER: 'same-origin',
-      BILLING_ADAPTER: 'mock',
-      APP_AUTH_SECRET: 'e2e-smoke-secret',
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-
+  let child = null;
   let stdoutBuf = '';
   let stderrBuf = '';
-  child.stdout.on('data', (d) => {
-    stdoutBuf += d.toString();
-  });
-  child.stderr.on('data', (d) => {
-    stderrBuf += d.toString();
-  });
+
+  if (!EXTERNAL_URL) {
+    const nextBin = path.join(ROOT_DIR, 'node_modules', 'next', 'dist', 'bin', 'next');
+    child = spawn(process.execPath, [nextBin, 'start', '-p', String(PORT), '-H', '127.0.0.1'], {
+      cwd: ROOT_DIR,
+      env: {
+        ...process.env,
+        PORT: String(PORT),
+        APP_BASE_URL: BASE_URL,
+        LLM_ADAPTER: 'mock',
+        BUILDER_ADAPTER: 'esbuild',
+        STORAGE_ADAPTER: 'pglite',
+        PGLITE_DATA_DIR: PGLITE_DIR,
+        PUBLISHER_ADAPTER: 'same-origin',
+        BILLING_ADAPTER: 'mock',
+        APP_AUTH_SECRET: 'e2e-smoke-secret',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    child.stdout.on('data', (d) => {
+      stdoutBuf += d.toString();
+    });
+    child.stderr.on('data', (d) => {
+      stderrBuf += d.toString();
+    });
+  }
+
   const getLogs = () =>
-    `--- STDOUT ---\n${stdoutBuf}\n--- STDERR ---\n${stderrBuf}`;
+    EXTERNAL_URL
+      ? `(external target: ${BASE_URL})`
+      : `--- STDOUT ---\n${stdoutBuf}\n--- STDERR ---\n${stderrBuf}`;
+
+  const createdIds = [];
 
   try {
-    await waitForServer(child, getLogs);
+    await waitForServer(child, getLogs, EXTERNAL_URL ? 15000 : 25000);
     console.log('1. Server ready on', BASE_URL);
 
     // 1. GET /
@@ -92,6 +107,13 @@ async function main() {
     const homeHtml = await homeRes.text();
     assert.match(homeHtml, /Mini Atoms/);
     console.log('2. GET / passed');
+
+    // 1b. GET /api/health
+    const healthRes = await fetch(`${BASE_URL}/api/health`);
+    assert.equal(healthRes.status, 200);
+    const healthJson = await healthRes.json();
+    assert.equal(healthJson.ok, true);
+    console.log('2b. GET /api/health passed:', healthJson);
 
     // 2. GET /api/models
     const modelsRes = await fetch(`${BASE_URL}/api/models`);
@@ -104,11 +126,12 @@ async function main() {
     const createRes = await fetch(`${BASE_URL}/api/projects`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title: '端到端活动站', slug: 'e2e-event-hub' }),
+      body: JSON.stringify({ title: '端到端活动站', slug: `e2e-event-hub${SUFFIX}` }),
     });
     assert.equal(createRes.status, 201);
     const { project } = await createRes.json();
     assert.ok(project.id);
+    createdIds.push(project.id);
     console.log('4. POST /api/projects passed:', project.id, project.slug);
 
     // 4. POST /api/projects/:id/start (SSE)
@@ -354,10 +377,11 @@ async function main() {
     const createBRes = await fetch(`${BASE_URL}/api/projects`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title: 'InkVault 笔记站', slug: 'e2e-inkvault' }),
+      body: JSON.stringify({ title: 'InkVault 笔记站', slug: `e2e-inkvault${SUFFIX}` }),
     });
     assert.equal(createBRes.status, 201);
     const { project: projB } = await createBRes.json();
+    createdIds.push(projB.id);
 
     const startBRes = await fetch(`${BASE_URL}/api/projects/${projB.id}/start`, {
       method: 'POST',
@@ -570,15 +594,26 @@ async function main() {
     console.error('E2E smoke failed.\n' + getLogs());
     throw err;
   } finally {
-    child.kill('SIGTERM');
-    await sleep(400);
-    if (child.exitCode === null) {
-      child.kill('SIGKILL');
+    if (EXTERNAL_URL) {
+      for (const id of createdIds) {
+        await fetch(`${BASE_URL}/api/projects/${id}`, { method: 'DELETE' }).catch(
+          () => undefined
+        );
+      }
     }
-    try {
-      fs.rmSync(TEMP_DIR, { recursive: true, force: true });
-    } catch {
-      // Ignore Windows temp file lock race on immediate exit
+    if (child) {
+      child.kill('SIGTERM');
+      await sleep(400);
+      if (child.exitCode === null) {
+        child.kill('SIGKILL');
+      }
+    }
+    if (TEMP_DIR) {
+      try {
+        fs.rmSync(TEMP_DIR, { recursive: true, force: true });
+      } catch {
+        // Ignore Windows temp file lock race on immediate exit
+      }
     }
   }
 }
