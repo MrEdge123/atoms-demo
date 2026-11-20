@@ -1,6 +1,10 @@
 import { NextResponse } from 'next/server';
 import { getContainer } from '@/container';
-import { isBuildingInProgress, isPlanningInProgress } from '@/core';
+import {
+  isBuildingInProgress,
+  isPlanningInProgress,
+  productPlanSchema,
+} from '@/core';
 import { createSseResponse } from '@/app/api/_utils';
 import type { ProductPlan } from '@/domain';
 
@@ -42,9 +46,21 @@ export async function POST(
     );
   }
 
+  let validatedPatch: Partial<ProductPlan> | undefined;
+  if (body.planPatch !== undefined) {
+    const parsedPatch = productPlanSchema.partial().safeParse(body.planPatch);
+    if (!parsedPatch.success) {
+      return NextResponse.json(
+        { error: '产品方案补丁格式无效，请检查字段类型后重试' },
+        { status: 400 }
+      );
+    }
+    validatedPatch = parsedPatch.data;
+  }
+
   return createSseResponse(
     c.workflow.confirmPlan(id, {
-      planPatch: body.planPatch,
+      planPatch: validatedPatch,
       model: body.model,
       mode: body.mode,
     })

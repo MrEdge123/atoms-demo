@@ -96,17 +96,31 @@ export class PostgresProjectRepository implements ProjectRepository {
     }
 
     const title = input.title.trim() || 'Untitled App';
-    const res = await this.sql.query<ProjectRow>(
-      `INSERT INTO projects (
-        id, slug, title, status, capabilities_json, plan_json,
-        draft_files_json, race_branches_json, published_files_json,
-        published_html, published_version, created_at, updated_at
-      ) VALUES ($1, $2, $3, 'idle', $4::jsonb, NULL, '{}'::jsonb, '[]'::jsonb, NULL, NULL, 0, $5, $5)
-      RETURNING *`,
-      [id, slug, title, JSON.stringify(['db']), now]
-    );
-
-    return mapProjectRow(res.rows[0]);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        const res = await this.sql.query<ProjectRow>(
+          `INSERT INTO projects (
+            id, slug, title, status, capabilities_json, plan_json,
+            draft_files_json, race_branches_json, published_files_json,
+            published_html, published_version, created_at, updated_at
+          ) VALUES ($1, $2, $3, 'idle', $4::jsonb, NULL, '{}'::jsonb, '[]'::jsonb, NULL, NULL, 0, $5, $5)
+          RETURNING *`,
+          [id, slug, title, JSON.stringify(['db']), now]
+        );
+        return mapProjectRow(res.rows[0]);
+      } catch (err) {
+        const pgCode =
+          typeof err === 'object' && err !== null && 'code' in err
+            ? String((err as { code?: unknown }).code)
+            : '';
+        if (pgCode === '23505' && attempt < 2) {
+          slug = `${baseSlug}-${crypto.randomUUID().slice(0, 4)}`;
+          continue;
+        }
+        throw err;
+      }
+    }
+    throw new Error('Failed to create project after slug collision retries');
   }
 
   async listAll(): Promise<Project[]> {

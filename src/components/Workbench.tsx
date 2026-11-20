@@ -193,6 +193,8 @@ export function Workbench() {
   const chatScrollRef = useRef<HTMLDivElement>(null);
   const activeIdRef = useRef<string | null>(null);
   const snapshotSeqRef = useRef(0);
+  const listVersionRef = useRef(0);
+  const hasAcceptedSnapshotRef = useRef(false);
   const modelsLoadedRef = useRef(false);
 
   useEffect(() => {
@@ -214,33 +216,54 @@ export function Workbench() {
     return () => document.removeEventListener('mousedown', handleOutside);
   }, []);
 
-  const loadSnapshot = useCallback(async (projectId: string) => {
-    const reqSeq = ++snapshotSeqRef.current;
-    const res = await fetch(`/api/projects/${projectId}`, { cache: 'no-store' });
-    if (!res.ok) return null;
-    const data = (await res.json()) as ProjectSnapshotResponse;
-    if (
-      reqSeq !== snapshotSeqRef.current ||
-      (activeIdRef.current && activeIdRef.current !== projectId)
-    ) {
-      return null;
-    }
-    setSnapshot(data);
-    setEvents(data.events);
-    setEditablePlan(data.project.plan);
+  const loadSnapshot = useCallback(
+    async (
+      projectId: string
+    ): Promise<{ data: ProjectSnapshotResponse | null; superseded: boolean }> => {
+      if (activeIdRef.current && activeIdRef.current !== projectId) {
+        return { data: null, superseded: true };
+      }
+      const reqSeq = ++snapshotSeqRef.current;
+      const res = await fetch(`/api/projects/${projectId}`, {
+        cache: 'no-store',
+      });
+      const staleAfterFetch = () =>
+        reqSeq !== snapshotSeqRef.current ||
+        (Boolean(activeIdRef.current) && activeIdRef.current !== projectId);
+      if (staleAfterFetch()) {
+        return { data: null, superseded: true };
+      }
+      if (!res.ok) {
+        return { data: null, superseded: false };
+      }
+      const data = (await res.json()) as ProjectSnapshotResponse;
+      if (staleAfterFetch()) {
+        return { data: null, superseded: true };
+      }
+      setSnapshot(data);
+      setEvents(data.events);
+      setEditablePlan(data.project.plan);
+      if (!hasAcceptedSnapshotRef.current) {
+        hasAcceptedSnapshotRef.current = true;
+        const draftCount = Object.keys(data.project.draftFiles).length;
+        setComposerMode(draftCount > 0 ? 'iterate' : 'restart');
+      }
 
-    const fileKeys = Object.keys(data.project.draftFiles);
-    if (fileKeys.length > 0) {
-      setSelectedFile((prev) =>
-        prev && fileKeys.includes(prev) ? prev : fileKeys[0]
-      );
-    } else {
-      setSelectedFile('');
-    }
-    return data;
-  }, []);
+      const fileKeys = Object.keys(data.project.draftFiles);
+      if (fileKeys.length > 0) {
+        setSelectedFile((prev) =>
+          prev && fileKeys.includes(prev) ? prev : fileKeys[0]
+        );
+      } else {
+        setSelectedFile('');
+      }
+      return { data, superseded: false };
+    },
+    []
+  );
 
   const refreshProjectsList = useCallback(async (preferredId?: string | null) => {
+    const reqVersion = listVersionRef.current;
     const projPromise = fetch('/api/projects', { cache: 'no-store' });
     const modelPromise = modelsLoadedRef.current
       ? null
@@ -254,6 +277,9 @@ export function Workbench() {
     }
     if (projRes.ok) {
       const pData = (await projRes.json()) as { projects: Project[] };
+      if (reqVersion !== listVersionRef.current) {
+        return { projects: pData.projects, targetId: null as string | null };
+      }
       setProjects(pData.projects);
       const targetId =
         preferredId && pData.projects.some((p) => p.id === preferredId)
@@ -270,8 +296,12 @@ export function Workbench() {
 
   useEffect(() => {
     function handleFrameMessage(event: MessageEvent) {
-      const payload = event.data as { type?: string; message?: string } | null;
-      if (payload?.type === 'ATOMS_RUNTIME_ERROR' && payload.message) {
+      const payload = event.data as { type?: string; message?: unknown } | null;
+      if (
+        payload?.type === 'ATOMS_RUNTIME_ERROR' &&
+        typeof payload.message === 'string' &&
+        payload.message.length > 0
+      ) {
         setRuntimeError(payload.message);
       }
     }
@@ -324,6 +354,7 @@ export function Workbench() {
     setCodeCompileErrors([]);
     setComposerText('');
     activeIdRef.current = projectId;
+    hasAcceptedSnapshotRef.current = false;
     setActiveId(projectId);
     setSnapshot(null);
     setEvents([]);
@@ -333,11 +364,8 @@ export function Workbench() {
     setWorkspaceSidebarOpen(false);
     setRightTab('preview');
     try {
-      const data = await loadSnapshot(projectId);
-      if (data) {
-        const draftCount = Object.keys(data.project.draftFiles).length;
-        setComposerMode(draftCount > 0 ? 'iterate' : 'restart');
-      } else {
+      const res = await loadSnapshot(projectId);
+      if (!res.data && !res.superseded) {
         setErrorMsg('无法加载项目详情，请刷新后重试');
       }
     } catch (err) {
@@ -358,8 +386,10 @@ export function Workbench() {
       throw new Error(errData.error || `创建项目失败 (HTTP ${res.status})`);
     }
     const data = (await res.json()) as { project: Project };
+    listVersionRef.current += 1;
     setProjects((prev) => [data.project, ...prev]);
     activeIdRef.current = data.project.id;
+    hasAcceptedSnapshotRef.current = false;
     setActiveId(data.project.id);
     return data.project;
   }
@@ -398,6 +428,7 @@ export function Workbench() {
     setRuntimeError('');
     setShareOpen(false);
     setBusyAction('Iris / Emma 正在分析需求...');
+    let streamError = '';
     try {
       const res = await fetch(`/api/projects/${projectId}/start`, {
         method: 'POST',
@@ -409,11 +440,21 @@ export function Workbench() {
       });
       await readSseStream(res, (ev) => {
         setEvents((prev) => [...prev, ev]);
+        if (
+          ev.type === 'error' &&
+          ev.payload &&
+          typeof (ev.payload as { message?: unknown }).message === 'string'
+        ) {
+          streamError = (ev.payload as { message: string }).message;
+        }
       });
       const latest = await loadSnapshot(projectId);
       void refreshProjectsList(projectId).catch(() => null);
-      if (latest && Object.keys(latest.project.draftFiles).length > 0) {
+      if (latest.data && Object.keys(latest.data.project.draftFiles).length > 0) {
         setComposerMode('iterate');
+      }
+      if (streamError) {
+        setErrorMsg(streamError);
       }
       setComposerText('');
     } catch (err) {
@@ -431,6 +472,7 @@ export function Workbench() {
     setShareOpen(false);
     try {
       const created = await createNewProject('AI 构建新项目');
+      hasAcceptedSnapshotRef.current = true;
       setSnapshot({
         project: created,
         events: [],
@@ -456,6 +498,7 @@ export function Workbench() {
     if (!activeId || !editablePlan || busyAction || isPlanning || isBuilding) {
       return;
     }
+    const targetId = activeId;
     setErrorMsg('');
     setRuntimeError('');
     setShareOpen(false);
@@ -464,8 +507,9 @@ export function Workbench() {
         ? 'Race Mode 并行生成双方案中...'
         : 'Alex 正在编写并编译应用...'
     );
+    let streamError = '';
     try {
-      const res = await fetch(`/api/projects/${activeId}/confirm`, {
+      const res = await fetch(`/api/projects/${targetId}/confirm`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -476,11 +520,21 @@ export function Workbench() {
       });
       await readSseStream(res, (ev) => {
         setEvents((prev) => [...prev, ev]);
+        if (
+          ev.type === 'error' &&
+          ev.payload &&
+          typeof (ev.payload as { message?: unknown }).message === 'string'
+        ) {
+          streamError = (ev.payload as { message: string }).message;
+        }
       });
-      const latest = await loadSnapshot(activeId);
-      void refreshProjectsList(activeId).catch(() => null);
-      if (latest && Object.keys(latest.project.draftFiles).length > 0) {
+      const latest = await loadSnapshot(targetId);
+      void refreshProjectsList(targetId).catch(() => null);
+      if (latest.data && Object.keys(latest.data.project.draftFiles).length > 0) {
         setComposerMode('iterate');
+      }
+      if (streamError) {
+        setErrorMsg(streamError);
       }
       setRightTab('preview');
     } catch (err) {
@@ -494,11 +548,12 @@ export function Workbench() {
     if (!activeId || busyAction || hasPendingPlanConfirmation || isBuilding) {
       return;
     }
+    const targetId = activeId;
     setErrorMsg('');
     setShareOpen(false);
     setBusyAction('正在切换所选方案...');
     try {
-      const res = await fetch(`/api/projects/${activeId}/select-branch`, {
+      const res = await fetch(`/api/projects/${targetId}/select-branch`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ branchId }),
@@ -507,11 +562,11 @@ export function Workbench() {
         const j = (await res.json()) as { error?: string };
         throw new Error(j.error || '切换失败');
       }
-      const latest = await loadSnapshot(activeId);
-      if (!latest) {
+      const latest = await loadSnapshot(targetId);
+      if (!latest.data && !latest.superseded) {
         throw new Error('所选方案已应用，但刷新预览失败，请点击刷新预览按钮');
       }
-      void refreshProjectsList(activeId).catch(() => null);
+      void refreshProjectsList(targetId).catch(() => null);
       setComposerMode('iterate');
       setRightTab('preview');
     } catch (err) {
@@ -524,12 +579,14 @@ export function Workbench() {
   async function handleIterate(customInstruction?: string) {
     const instruction = (customInstruction ?? composerText).trim();
     if (!activeId || !instruction || iterateBlockReason || busyAction) return;
+    const targetId = activeId;
     setErrorMsg('');
     setRuntimeError('');
     setShareOpen(false);
     setBusyAction('Alex 正在按指令迭代修改...');
+    let streamError = '';
     try {
-      const res = await fetch(`/api/projects/${activeId}/iterate`, {
+      const res = await fetch(`/api/projects/${targetId}/iterate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -539,10 +596,20 @@ export function Workbench() {
       });
       await readSseStream(res, (ev) => {
         setEvents((prev) => [...prev, ev]);
+        if (
+          ev.type === 'error' &&
+          ev.payload &&
+          typeof (ev.payload as { message?: unknown }).message === 'string'
+        ) {
+          streamError = (ev.payload as { message: string }).message;
+        }
       });
       if (!customInstruction) setComposerText('');
-      await loadSnapshot(activeId);
-      void refreshProjectsList(activeId).catch(() => null);
+      await loadSnapshot(targetId);
+      void refreshProjectsList(targetId).catch(() => null);
+      if (streamError) {
+        setErrorMsg(streamError);
+      }
       setRightTab('preview');
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : String(err));
@@ -553,10 +620,11 @@ export function Workbench() {
 
   async function handlePublish() {
     if (!activeId || !hasDraft || publishBlockReason || busyAction) return;
+    const targetId = activeId;
     setErrorMsg('');
     setBusyAction('正在构建并发布独立生产站点...');
     try {
-      const res = await fetch(`/api/projects/${activeId}/publish`, {
+      const res = await fetch(`/api/projects/${targetId}/publish`, {
         method: 'POST',
       });
       const data = (await res.json()) as {
@@ -568,8 +636,8 @@ export function Workbench() {
       if (!res.ok || !data.url || !data.qrDataUrl) {
         throw new Error(data.error || '发布失败');
       }
-      await loadSnapshot(activeId);
-      void refreshProjectsList(activeId).catch(() => null);
+      await loadSnapshot(targetId);
+      void refreshProjectsList(targetId).catch(() => null);
       setShareOpen(true);
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : String(err));
@@ -618,6 +686,7 @@ export function Workbench() {
       if (!res.ok || !data.project) {
         throw new Error(data.error || '重命名失败');
       }
+      listVersionRef.current += 1;
       setProjects((prev) =>
         prev.map((p) => (p.id === projectId ? data.project! : p))
       );
@@ -642,10 +711,13 @@ export function Workbench() {
       if (!res.ok) {
         throw new Error(data.error || '删除项目失败');
       }
+      listVersionRef.current += 1;
       setProjects((prev) => prev.filter((p) => p.id !== projectId));
       setConfirmDeleteProjectId(null);
       setProjectMenuOpen(false);
       if (activeId === projectId) {
+        activeIdRef.current = null;
+        hasAcceptedSnapshotRef.current = false;
         setActiveId(null);
         setSnapshot(null);
         setEvents([]);
@@ -672,12 +744,13 @@ export function Workbench() {
     ) {
       return;
     }
+    const targetId = activeId;
     setSavingCode(true);
     setCodeSaveBanner(null);
     setCodeCompileErrors([]);
     try {
       const nextFiles = { ...draftFiles, [selectedFile]: codeDraft };
-      const res = await fetch(`/api/projects/${activeId}/files`, {
+      const res = await fetch(`/api/projects/${targetId}/files`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ files: nextFiles }),
@@ -693,8 +766,17 @@ export function Workbench() {
         throw new Error(data.error || '保存源码失败');
       }
 
+      listVersionRef.current += 1;
+      setProjects((prev) =>
+        prev.map((p) => (p.id === targetId ? data.project! : p))
+      );
+
+      if (activeIdRef.current !== targetId) {
+        return;
+      }
+
       setSnapshot((prev) =>
-        prev
+        prev && prev.project.id === targetId
           ? {
               ...prev,
               project: data.project!,
@@ -703,10 +785,11 @@ export function Workbench() {
             }
           : prev
       );
-      setProjects((prev) =>
-        prev.map((p) => (p.id === activeId ? data.project! : p))
-      );
-      await loadSnapshot(activeId);
+      await loadSnapshot(targetId);
+
+      if (activeIdRef.current !== targetId) {
+        return;
+      }
 
       if (data.ok) {
         setIsEditingCode(false);
@@ -723,10 +806,12 @@ export function Workbench() {
         });
       }
     } catch (err) {
-      setCodeSaveBanner({
-        ok: false,
-        message: err instanceof Error ? err.message : String(err),
-      });
+      if (activeIdRef.current === targetId) {
+        setCodeSaveBanner({
+          ok: false,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
     } finally {
       setSavingCode(false);
     }
@@ -1555,7 +1640,7 @@ export function Workbench() {
                           <iframe
                             title={br.label}
                             srcDoc={br.previewHtml}
-                            sandbox="allow-scripts allow-forms allow-popups allow-modals"
+                            sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals"
                             className="w-full flex-1 bg-white"
                           />
                         ) : (
@@ -1572,7 +1657,7 @@ export function Workbench() {
                   <iframe
                     title="应用实时预览"
                     srcDoc={snapshot.previewHtml}
-                    sandbox="allow-scripts allow-forms allow-popups allow-modals"
+                    sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals"
                     className={
                       viewport === 'mobile'
                         ? 'w-[390px] h-full max-h-[844px] rounded-[28px] border-[6px] border-[#0c0c0c]/85 bg-white shadow-xl'

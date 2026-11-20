@@ -67,9 +67,12 @@ async function runModelDiscovery() {
   }
 
   if (kimiKey) {
+    const configuredKimiUrl = process.env.KIMI_BASE_URL?.trim();
     const res = await probeModels(
       'kimi',
-      ['https://api.moonshot.cn/v1', 'https://api.moonshot.ai/v1'],
+      configuredKimiUrl
+        ? [configuredKimiUrl]
+        : ['https://api.moonshot.cn/v1', 'https://api.moonshot.ai/v1'],
       kimiKey
     );
     console.log('Kimi probe:', JSON.stringify(res));

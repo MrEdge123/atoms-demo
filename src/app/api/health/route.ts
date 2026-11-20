@@ -6,7 +6,7 @@ export const dynamic = 'force-dynamic';
 export async function GET() {
   try {
     const c = await getContainer();
-    await c.repo.listAll();
+    await c.repo.getById('__health_probe__');
     return NextResponse.json({
       ok: true,
       storage: process.env.STORAGE_ADAPTER || 'pglite',

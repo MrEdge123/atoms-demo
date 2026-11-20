@@ -90,6 +90,18 @@ export async function createContainer(
         ? 'postgres'
         : 'pglite');
 
+  if (
+    storageAdapter === 'postgres' &&
+    process.env.NODE_ENV === 'production' &&
+    (!authSecret.trim() ||
+      authSecret === 'dev-local-secret-change-in-production' ||
+      authSecret === 'replace-with-long-random-secret')
+  ) {
+    throw new Error(
+      'APP_AUTH_SECRET must be set to a strong non-default secret in production when STORAGE_ADAPTER=postgres'
+    );
+  }
+
   const publisherAdapter =
     overrides.publisherAdapter ??
     (process.env.PUBLISHER_ADAPTER === 'memory' ? 'memory' : 'same-origin');

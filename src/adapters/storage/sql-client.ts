@@ -131,6 +131,9 @@ export class NodePgSqlClient implements SqlClient {
 
   constructor(connectionString: string) {
     this.pool = new Pool({ connectionString });
+    this.pool.on('error', (err) => {
+      console.warn('[Postgres] idle pool client error:', err.message);
+    });
   }
 
   private ensureReady(): Promise<void> {

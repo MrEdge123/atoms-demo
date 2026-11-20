@@ -314,28 +314,52 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
               styleDirection: `${dir.label}: ${dir.styleDirection}`,
             });
 
-            const { files, artifact } = await this.buildWithAutoFix({
-              projectId,
-              plan: mergedPlan,
-              baseFiles: {},
-              initialPrompt: prompt,
-              model: input?.model,
-              branchId: dir.branchId,
-              onEvent: (ev) => {
-                buffered.push(ev);
-              },
-            });
+            try {
+              const { files, artifact } = await this.buildWithAutoFix({
+                projectId,
+                plan: mergedPlan,
+                baseFiles: {},
+                initialPrompt: prompt,
+                model: input?.model,
+                branchId: dir.branchId,
+                onEvent: (ev) => {
+                  buffered.push(ev);
+                },
+              });
 
-            const branch: RaceBranch = {
-              branchId: dir.branchId,
-              label: dir.label,
-              styleDirection: dir.styleDirection,
-              files,
-              previewHtml: artifact.ok ? artifact.html : null,
-              errors: artifact.ok ? [] : artifact.errors,
-            };
+              const branch: RaceBranch = {
+                branchId: dir.branchId,
+                label: dir.label,
+                styleDirection: dir.styleDirection,
+                files,
+                previewHtml: artifact.ok ? artifact.html : null,
+                errors: artifact.ok ? [] : artifact.errors,
+              };
 
-            return { branch, buffered };
+              return { branch, buffered };
+            } catch (branchErr) {
+              const message =
+                branchErr instanceof Error ? branchErr.message : String(branchErr);
+              buffered.push({
+                role: 'alex',
+                branchId: dir.branchId,
+                type: 'build_result',
+                payload: {
+                  ok: false,
+                  errors: [{ phase: 'compile', message }],
+                  autoFixRounds: 0,
+                },
+              });
+              const branch: RaceBranch = {
+                branchId: dir.branchId,
+                label: dir.label,
+                styleDirection: dir.styleDirection,
+                files: {},
+                previewHtml: null,
+                errors: [{ phase: 'compile', message }],
+              };
+              return { branch, buffered };
+            }
           })
         );
 

@@ -28,6 +28,12 @@ export async function POST(req: Request) {
   const rawSlug =
     body.slug?.trim() ||
     `app-${Date.now().toString(36).slice(-5)}`;
+  if (rawSlug.length > 64) {
+    return NextResponse.json(
+      { error: '项目 slug 长度不能超过 64 个字符' },
+      { status: 400 }
+    );
+  }
 
   const c = await getContainer();
   const project = await c.repo.create({ title, slug: rawSlug });
