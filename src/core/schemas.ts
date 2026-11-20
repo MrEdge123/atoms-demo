@@ -153,6 +153,24 @@ export const intentRouteSchema = z.object({
 export type IntentRouteOutput = z.infer<typeof intentRouteSchema>;
 
 /**
+ * Multi-agent collaboration division-of-labor step and plan produced when
+ * the user mentions two or more distinct agents in a single prompt.
+ */
+export const multiMentionStepSchema = z.object({
+  role: z.enum(['iris', 'emma', 'alex']),
+  subTask: z.string().min(1).max(400),
+  dependsOn: z.array(z.enum(['iris', 'emma'])).max(2),
+  requireConfirmBeforeRun: z.boolean().optional(),
+});
+
+export const multiMentionPlanSchema = z.object({
+  rationale: z.string().min(1).max(220),
+  steps: z.array(multiMentionStepSchema).min(2).max(3),
+});
+
+export type MultiMentionPlanOutput = z.infer<typeof multiMentionPlanSchema>;
+
+/**
  * Conversational reply with actionable handoff options produced by Emma or Iris.
  */
 export const agentReplySchema = z.object({

@@ -195,6 +195,44 @@ ${input.message}`,
   };
 }
 
+export function buildMultiMentionPlannerPrompt(input: {
+  plan: ProductPlan | null;
+  designSummary?: string;
+  recentContext?: string;
+  message: string;
+  mentionedRoles: Array<'iris' | 'emma' | 'alex'>;
+}): { system: string; prompt: string } {
+  return {
+    system: `You are the Multi-Agent Orchestrator for Mini Atoms.
+The user explicitly @mentioned multiple AI specialists in a single message (${input.mentionedRoles.join(', ')}):
+- "iris": Deep Researcher (market benchmarks, competitor practices, retention/monetization strategy, user insights; read-only, never edits code).
+- "emma": Product Manager & Design Director (product scope, UX flows, palette/visual direction, concrete build specs; read-only, never edits code).
+- "alex": Full-Stack Engineer (single-writer who edits/builds application code; ALWAYS runs after any upstream role it depends on).
+
+Decompose the user's message semantically (do NOT apply rigid keyword rules) into a clean, coordinated division-of-labor plan:
+1. Emit EXACTLY one step for each unique role listed in Mentioned Roles (${input.mentionedRoles.join(', ')}). Never add unmentioned roles and never drop any mentioned role.
+2. For each step, write a concise, self-contained "subTask" in the user's language (Chinese if the prompt is Chinese) capturing that role's exact responsibility.
+3. Set "dependsOn" accurately:
+   - "iris" step: "dependsOn" MUST be [].
+   - "emma" step: if "iris" is mentioned, set "dependsOn": ["iris"] ONLY when Emma's product/design task depends on Iris's research conclusions; set "dependsOn": [] when Iris and Emma are answering independent angles that can run concurrently in parallel.
+   - "alex" step: include whichever mentioned upstream role(s) ("iris", "emma") produce decisions or specs that Alex needs to implement; set "dependsOn": [] ONLY when Alex's coding request is an independent concrete edit unrelated to the other agent's question.
+4. Set "requireConfirmBeforeRun" (meaningful ONLY for "alex", omit/false for "iris" and "emma"):
+   - Set true when "alex" depends on "emma"/"iris" AND the user's phrasing is exploratory, tentative, or asks to discuss/review options before modifying code.
+   - Set false when the user asks the team to directly execute the handoff into code in one pass, or when "alex" has an independent concrete coding subtask.
+5. Write "rationale" concisely (<= 60 chars) in the user's language explaining the division of labor and execution mode (parallel, sequential handoff, or pause for confirmation).
+Return strictly valid JSON matching { "rationale": string, "steps": [{ "role": "iris" | "emma" | "alex", "subTask": string, "dependsOn": ("iris" | "emma")[], "requireConfirmBeforeRun"?: boolean }] }.`,
+    prompt: `Current App Summary:
+${input.plan ? `${input.plan.appName}: ${input.plan.summary}` : '(No product plan yet)'}
+${input.designSummary ? `\nDesign Direction:\n${input.designSummary}` : ''}
+${input.recentContext ? `\nRecent Conversation Context:\n${input.recentContext}` : ''}
+
+Mentioned Roles: ${input.mentionedRoles.join(', ')}
+
+User Message:
+${input.message}`,
+  };
+}
+
 export function buildEmmaDiscussPrompt(input: {
   plan: ProductPlan | null;
   designMd?: string;

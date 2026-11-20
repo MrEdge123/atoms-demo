@@ -19,4 +19,8 @@ export type {
   AgentEventType,
   AgentMentionSpan,
   AgentRole,
+  CollaborationPlanPayload,
+  CollaborationStepState,
+  CollaborationStepStatus,
+  CollaborationStepUpdatePayload,
 } from './events';

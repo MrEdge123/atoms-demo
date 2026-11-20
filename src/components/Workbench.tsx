@@ -18,6 +18,7 @@ import {
   FolderPlus,
   Home,
   LayoutGrid,
+  Loader2,
   Monitor,
   Palette,
   PanelLeftClose,
@@ -63,6 +64,7 @@ import {
 import { CloudDataPanel } from './CloudDataPanel';
 import {
   AgentBadge,
+  AgentCluster,
   AtomsLogoMark,
   ModelDropdown,
   StatusPill,
@@ -200,7 +202,9 @@ export function Workbench() {
   const [workspaceSidebarOpen, setWorkspaceSidebarOpen] = useState(false);
 
   const [projects, setProjects] = useState<Project[]>([]);
+  const [projectsLoading, setProjectsLoading] = useState(true);
   const [activeId, setActiveId] = useState<string | null>(null);
+  const [loadingProjectId, setLoadingProjectId] = useState<string | null>(null);
   const [snapshot, setSnapshot] = useState<ProjectSnapshotResponse | null>(null);
   const [events, setEvents] = useState<AgentEvent[]>([]);
 
@@ -521,33 +525,39 @@ export function Workbench() {
       retryDepth = 0
     ): Promise<{ projects: Project[]; targetId: string | null }> => {
       const reqVersion = listVersionRef.current;
-      const projPromise = workbenchFetch('/api/projects', { cache: 'no-store' });
-      const modelPromise = modelsLoadedRef.current
-        ? null
-        : workbenchFetch('/api/models', { cache: 'no-store' });
-      const [projRes, modelRes] = await Promise.all([projPromise, modelPromise]);
-      if (modelRes && modelRes.ok) {
-        modelsLoadedRef.current = true;
-        const mData = (await modelRes.json()) as { models: ModelInfo[] };
-        setModels(mData.models);
-        setSelectedModel((prev) => prev || mData.models[0]?.id || 'mock-default');
-      }
-      if (projRes.ok) {
-        const pData = (await projRes.json()) as { projects: Project[] };
-        if (reqVersion !== listVersionRef.current) {
-          if (retryDepth < 1) {
-            return refreshProjectsList(preferredId, retryDepth + 1);
-          }
-          return { projects: pData.projects, targetId: null };
+      try {
+        const projPromise = workbenchFetch('/api/projects', { cache: 'no-store' });
+        const modelPromise = modelsLoadedRef.current
+          ? null
+          : workbenchFetch('/api/models', { cache: 'no-store' });
+        const [projRes, modelRes] = await Promise.all([projPromise, modelPromise]);
+        if (modelRes && modelRes.ok) {
+          modelsLoadedRef.current = true;
+          const mData = (await modelRes.json()) as { models: ModelInfo[] };
+          setModels(mData.models);
+          setSelectedModel((prev) => prev || mData.models[0]?.id || 'mock-default');
         }
-        setProjects(pData.projects);
-        const targetId =
-          preferredId && pData.projects.some((p) => p.id === preferredId)
-            ? preferredId
-            : pData.projects[0]?.id ?? null;
-        return { projects: pData.projects, targetId };
+        if (projRes.ok) {
+          const pData = (await projRes.json()) as { projects: Project[] };
+          if (reqVersion !== listVersionRef.current) {
+            if (retryDepth < 1) {
+              return refreshProjectsList(preferredId, retryDepth + 1);
+            }
+            return { projects: pData.projects, targetId: null };
+          }
+          setProjects(pData.projects);
+          const targetId =
+            preferredId && pData.projects.some((p) => p.id === preferredId)
+              ? preferredId
+              : pData.projects[0]?.id ?? null;
+          return { projects: pData.projects, targetId };
+        }
+        return { projects: [] as Project[], targetId: null };
+      } finally {
+        if (reqVersion === listVersionRef.current) {
+          setProjectsLoading(false);
+        }
       }
-      return { projects: [] as Project[], targetId: null };
     },
     []
   );
@@ -572,6 +582,14 @@ export function Workbench() {
   }, []);
 
   const project = snapshot?.project ?? null;
+  const activeProjectMeta = useMemo(
+    () => (activeId ? projects.find((p) => p.id === activeId) ?? null : null),
+    [activeId, projects]
+  );
+  const displayProject = project ?? activeProjectMeta;
+  const isLoadingProject = Boolean(
+    activeId && loadingProjectId === activeId && !snapshot
+  );
   const draftFiles = useMemo(() => project?.draftFiles ?? {}, [project]);
   const fileNames = useMemo(() => Object.keys(draftFiles), [draftFiles]);
   const filteredFileNames = useMemo(() => {
@@ -628,6 +646,7 @@ export function Workbench() {
     activeIdRef.current = projectId;
     hasAcceptedSnapshotRef.current = false;
     setActiveId(projectId);
+    setLoadingProjectId(projectId);
     setSnapshot(null);
     setEvents([]);
     setEditablePlan(null);
@@ -642,6 +661,8 @@ export function Workbench() {
       }
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoadingProjectId((cur) => (cur === projectId ? null : cur));
     }
   }
 
@@ -682,6 +703,7 @@ export function Workbench() {
     setTargetAgent('auto');
     try {
       const created = await createNewProject();
+      setLoadingProjectId(created.id);
       setSnapshot(null);
       setEvents([]);
       setEditablePlan(null);
@@ -690,7 +712,11 @@ export function Workbench() {
       setWorkspaceSidebarOpen(false);
       setRightTab('preview');
       setComposerMode('restart');
-      await loadSnapshot(created.id);
+      try {
+        await loadSnapshot(created.id);
+      } finally {
+        setLoadingProjectId((cur) => (cur === created.id ? null : cur));
+      }
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : String(err));
     }
@@ -972,25 +998,71 @@ export function Workbench() {
           mentions: normalizedMentions,
         }),
       });
+      const activeCollabRoles = new Set<string>();
       await readSseStream(res, (ev) => {
-        if (ev.type === 'role_start') {
+        if (ev.type === 'collaboration_plan') {
+          sawRoleStart = true;
+          setOptimisticPrompt((cur) =>
+            cur?.projectId === targetId ? null : cur
+          );
+          if (isCurrentProject()) {
+            setBusyAction('AI 团队正在按分工协作执行...');
+          }
+        } else if (ev.type === 'collaboration_step') {
+          const stepPayload = (ev.payload ?? {}) as {
+            role?: string;
+            status?: string;
+          };
+          if (typeof stepPayload.role === 'string') {
+            if (stepPayload.status === 'running') {
+              activeCollabRoles.add(stepPayload.role);
+            } else {
+              activeCollabRoles.delete(stepPayload.role);
+            }
+          }
+          if (stepPayload.role === 'alex' && stepPayload.status === 'running') {
+            routedToAlex = true;
+            if (isCurrentProject()) {
+              setBusyAction('Alex 正在按协作方案迭代代码...');
+            }
+          } else if (
+            activeCollabRoles.has('iris') &&
+            activeCollabRoles.has('emma')
+          ) {
+            if (isCurrentProject()) {
+              setBusyAction('Iris & Emma 正在并行分析...');
+            }
+          } else if (activeCollabRoles.has('emma')) {
+            if (isCurrentProject()) {
+              setBusyAction('Emma 正在梳理产品与视觉建议...');
+            }
+          } else if (activeCollabRoles.has('iris')) {
+            if (isCurrentProject()) {
+              setBusyAction('Iris 正在开展调研分析...');
+            }
+          } else if (stepPayload.status === 'awaiting_confirmation') {
+            if (isCurrentProject()) {
+              setBusyAction('等待确认交由 Alex 实施...');
+            }
+          }
+        } else if (ev.type === 'role_start') {
           sawRoleStart = true;
           setOptimisticPrompt((cur) =>
             cur?.projectId === targetId ? null : cur
           );
           if (ev.role === 'emma') {
             routedToAlex = false;
-            if (isCurrentProject()) {
+            if (isCurrentProject() && activeCollabRoles.size === 0) {
               setBusyAction('Emma 正在梳理产品与视觉建议...');
             }
           } else if (ev.role === 'iris') {
             routedToAlex = false;
-            if (isCurrentProject()) {
+            if (isCurrentProject() && activeCollabRoles.size === 0) {
               setBusyAction('Iris 正在开展调研分析...');
             }
           } else if (ev.role === 'alex') {
             routedToAlex = true;
-            if (isCurrentProject()) {
+            if (isCurrentProject() && activeCollabRoles.size === 0) {
               setBusyAction('Alex 正在按指令迭代修改...');
             }
           }
@@ -1255,6 +1327,7 @@ export function Workbench() {
     setCodeSaveBanner(null);
     setCodeCompileErrors([]);
     setWorkspaceSidebarOpen(false);
+    setLoadingProjectId(null);
     setErrorMsg('');
     setRuntimeError('');
     setViewMode('launcher');
@@ -1265,6 +1338,7 @@ export function Workbench() {
       <>
         <LauncherView
           projects={projects}
+          isLoadingProjects={projectsLoading}
           models={models}
           selectedModel={selectedModel}
           onSelectModel={setSelectedModel}
@@ -1301,6 +1375,7 @@ export function Workbench() {
 
   const effectiveComposerMode = hasDraft ? composerMode : 'restart';
   const composerLocked =
+    isLoadingProject ||
     Boolean(busyAction) ||
     (effectiveComposerMode === 'iterate' && isMutationLocked);
   const canSubmitComposer = Boolean(composerValue.text.trim()) && !composerLocked;
@@ -1655,7 +1730,8 @@ export function Workbench() {
               className="h-7 max-w-[180px] xl:max-w-[240px] inline-flex items-center gap-1.5 rounded-lg px-2 text-xs font-semibold text-[#0c0c0c]/90 hover:bg-black/[0.05] transition cursor-pointer"
             >
               <span className="truncate">
-                {project?.title ?? '未命名应用'}
+                {displayProject?.title ??
+                  (isLoadingProject ? '正在加载项目...' : '未命名应用')}
               </span>
               <ChevronDown className="w-3.5 h-3.5 text-[#0c0c0c]/45 shrink-0" />
             </button>
@@ -1798,14 +1874,19 @@ export function Workbench() {
             )}
           </div>
 
-          {project && (
+          {isLoadingProject ? (
+            <div className="hidden xl:inline-flex items-center gap-1.5 rounded-full bg-[#4267ff]/10 px-2.5 py-0.5 text-[11px] font-medium text-[#4267ff] shrink-0">
+              <Loader2 className="w-3 h-3 animate-spin" />
+              加载中
+            </div>
+          ) : displayProject ? (
             <div className="hidden xl:inline-flex shrink-0">
               <StatusPill
-                status={project.status}
-                publishedVersion={project.publishedVersion}
+                status={displayProject.status}
+                publishedVersion={displayProject.publishedVersion}
               />
             </div>
-          )}
+          ) : null}
         </div>
 
         {/* Center/Right Segmented Stage Bar + Controls */}
@@ -2035,8 +2116,17 @@ export function Workbench() {
             className="flex-1 overflow-y-auto px-3.5 py-3 space-y-4"
           >
             {errorMsg && (
-              <div className="rounded-xl border border-[#c9444a]/30 bg-[#c9444a]/10 px-3 py-2.5 text-xs text-[#b72027]">
-                {errorMsg}
+              <div className="rounded-xl border border-[#c9444a]/30 bg-[#c9444a]/10 px-3 py-2.5 text-xs text-[#b72027] flex items-center justify-between gap-2">
+                <span className="min-w-0 break-words">{errorMsg}</span>
+                {activeId && !snapshot && !isLoadingProject && (
+                  <button
+                    type="button"
+                    onClick={() => void openProjectInWorkspace(activeId)}
+                    className="shrink-0 rounded-full border border-[#c9444a]/35 bg-white px-2.5 py-1 text-[11px] font-medium text-[#b72027] hover:bg-[#c9444a]/[0.06] cursor-pointer"
+                  >
+                    重新加载项目
+                  </button>
+                )}
               </div>
             )}
 
@@ -2094,6 +2184,8 @@ export function Workbench() {
 
             <TimelineStream
               events={events}
+              isLoading={isLoadingProject}
+              loadingTitle={displayProject?.title}
               onOpenPreview={() => setRightTab('preview')}
               onOpenCode={() => setRightTab('code')}
               onRunSuggestion={(inst, role) =>
@@ -2206,29 +2298,36 @@ export function Workbench() {
                   disabled={composerLocked}
                   onMentionPick={() => setTargetAgent('auto')}
                   placeholder={
-                    effectiveComposerMode === 'restart'
-                      ? '输入新的产品想法（将启动 Iris 调研 → Emma 方案确认）...'
-                      : hasPendingPlanConfirmation
-                        ? isPlanning
-                          ? 'Iris / Emma 正在生成新方案，请等待确认后再迭代...'
-                          : '请先在上方确认 Emma 新方案并构建...'
-                        : hasPendingRaceSelection
-                          ? '请先在右侧选择一个 Race Mode 候选方案...'
-                          : isBuilding
-                            ? 'Alex 正在构建中，请稍候...'
-                            : targetAgent === 'emma'
-                              ? '和 Emma 探讨产品方案、交互体验或配色建议...'
-                              : targetAgent === 'iris'
-                                ? '向 Iris 提问市场需求、竞品做法或用户留存建议...'
-                                : targetAgent === 'alex'
-                                  ? '直接向 Alex 下达具体改代码指令（不影响已发布线上版本）...'
-                                  : '输入想法或修改需求（默认智能路由，输入 @ 可在任意位置指定智能体）...'
+                    isLoadingProject
+                      ? '正在加载项目详情与源码，请稍候...'
+                      : effectiveComposerMode === 'restart'
+                        ? '输入新的产品想法（将启动 Iris 调研 → Emma 方案确认）...'
+                        : hasPendingPlanConfirmation
+                          ? isPlanning
+                            ? 'Iris / Emma 正在生成新方案，请等待确认后再迭代...'
+                            : '请先在上方确认 Emma 新方案并构建...'
+                          : hasPendingRaceSelection
+                            ? '请先在右侧选择一个 Race Mode 候选方案...'
+                            : isBuilding
+                              ? 'Alex 正在构建中，请稍候...'
+                              : targetAgent === 'emma'
+                                ? '和 Emma 探讨产品方案、交互体验或配色建议...'
+                                : targetAgent === 'iris'
+                                  ? '向 Iris 提问市场需求、竞品做法或用户留存建议...'
+                                  : targetAgent === 'alex'
+                                    ? '直接向 Alex 下达具体改代码指令（不影响已发布线上版本）...'
+                                    : '输入想法或修改需求（默认智能路由，输入 @ 可在任意位置指定智能体）...'
                   }
                 />
 
                 <div className="flex items-center justify-between gap-2 pt-0.5">
                   {/* Mode Switch inside Composer Footer */}
-                  {hasDraft ? (
+                  {isLoadingProject ? (
+                    <span className="inline-flex items-center gap-1.5 text-[11px] text-[#0c0c0c]/45">
+                      <Loader2 className="w-3 h-3 animate-spin text-[#4267ff]" />
+                      正在同步项目状态...
+                    </span>
+                  ) : hasDraft ? (
                     <div className="inline-flex items-center rounded-full bg-black/[0.04] p-0.5 border border-black/[0.05]">
                       <button
                         type="button"
@@ -2263,9 +2362,11 @@ export function Workbench() {
                   <button
                     type="submit"
                     aria-label={
-                      effectiveComposerMode === 'restart'
-                        ? '启动 AI 团队规划'
-                        : '发送对话或迭代指令'
+                      isLoadingProject
+                        ? '正在加载项目'
+                        : effectiveComposerMode === 'restart'
+                          ? '启动 AI 团队规划'
+                          : '发送对话或迭代指令'
                     }
                     title={
                       effectiveComposerMode === 'iterate'
@@ -2275,7 +2376,9 @@ export function Workbench() {
                     disabled={!canSubmitComposer}
                     className="h-8 px-3 rounded-[10px] bg-[#4267ff] text-white inline-flex items-center justify-center gap-1 text-xs font-medium hover:bg-[#425ce1] transition disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer"
                   >
-                    {effectiveComposerMode === 'restart' ? (
+                    {isLoadingProject ? (
+                      <span>加载中</span>
+                    ) : effectiveComposerMode === 'restart' ? (
                       <span>启动规划</span>
                     ) : (
                       <span>{targetAgent === 'alex' ? '迭代' : '发送'}</span>
@@ -2290,6 +2393,47 @@ export function Workbench() {
 
         {/* Right Stage Canvas */}
         <main className="flex-1 min-w-0 bg-[#f3f3f0] p-2.5 flex flex-col min-h-0">
+          {isLoadingProject ? (
+            <div
+              data-testid="project-loading-stage"
+              className="flex-1 min-h-0 flex flex-col rounded-2xl border border-black/[0.08] bg-white shadow-[0_2px_10px_rgba(12,12,12,0.04)] overflow-hidden"
+            >
+              <div className="h-9 shrink-0 border-b border-black/[0.06] bg-[#fcfcfb] px-3.5 flex items-center gap-2">
+                <Loader2 className="w-3.5 h-3.5 text-[#4267ff] animate-spin" />
+                <span className="text-[11px] font-medium text-[#0c0c0c]/60">
+                  正在拉取项目快照与编译产物...
+                </span>
+              </div>
+              <div className="flex-1 flex flex-col items-center justify-center p-8 text-center space-y-4 bg-[#fcfcfb]">
+                <div className="relative flex items-center justify-center">
+                  <div className="px-3.5 py-3 rounded-2xl border border-black/[0.08] bg-white shadow-xs flex items-center justify-center">
+                    <AgentCluster />
+                  </div>
+                  <span className="absolute -bottom-1.5 -right-1.5 w-6 h-6 rounded-full bg-[#4267ff] text-white flex items-center justify-center shadow-sm">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  </span>
+                </div>
+                <div className="space-y-1">
+                  <h2 className="text-sm font-semibold text-[#0c0c0c]/90">
+                    正在加载「{displayProject?.title ?? '项目'}」
+                  </h2>
+                  <p className="text-xs text-[#0c0c0c]/55 max-w-md leading-relaxed">
+                    正在同步对话历史、源码文件与实时预览，请稍候...
+                  </p>
+                </div>
+                <div className="w-full max-w-lg rounded-xl border border-black/[0.06] bg-white p-4 space-y-2.5 animate-pulse">
+                  <div className="h-3 w-1/3 rounded bg-black/[0.07]" />
+                  <div className="h-24 w-full rounded-lg bg-black/[0.04]" />
+                  <div className="grid grid-cols-3 gap-2">
+                    <div className="h-8 rounded-lg bg-black/[0.04]" />
+                    <div className="h-8 rounded-lg bg-black/[0.04]" />
+                    <div className="h-8 rounded-lg bg-black/[0.04]" />
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <>
           {rightTab === 'preview' && (
             <div className="flex-1 min-h-0 flex flex-col rounded-2xl border border-black/[0.08] bg-white shadow-[0_2px_10px_rgba(12,12,12,0.04)] overflow-hidden">
               {/* Simulated Browser Chrome / Pending Notices */}
@@ -2786,6 +2930,8 @@ export function Workbench() {
                 </div>
               </div>
             </div>
+          )}
+            </>
           )}
         </main>
       </div>

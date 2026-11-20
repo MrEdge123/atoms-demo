@@ -14,12 +14,50 @@ export interface AgentMentionSpan {
   end: number;
 }
 
+export type CollaborationStepStatus =
+  | 'pending'
+  | 'running'
+  | 'completed'
+  | 'awaiting_confirmation'
+  | 'failed';
+
+export interface CollaborationStepState {
+  stepId: string;
+  role: 'iris' | 'emma' | 'alex';
+  subTask: string;
+  dependsOn: Array<'iris' | 'emma'>;
+  parallelGroup?: number;
+  status: CollaborationStepStatus;
+  requireConfirmBeforeRun?: boolean;
+  handoffInstruction?: string;
+  error?: string;
+}
+
+export interface CollaborationPlanPayload {
+  turnId: string;
+  instruction: string;
+  mentions: AgentMentionSpan[];
+  rationale: string;
+  steps: CollaborationStepState[];
+}
+
+export interface CollaborationStepUpdatePayload {
+  turnId: string;
+  stepId: string;
+  role: 'iris' | 'emma' | 'alex';
+  status: CollaborationStepStatus;
+  handoffInstruction?: string;
+  error?: string;
+}
+
 /**
  * Event types emitted over SSE and persisted in the project event log.
  */
 export type AgentEventType =
   | 'role_start'
   | 'intent_routed'
+  | 'collaboration_plan'
+  | 'collaboration_step'
   | 'thought'
   | 'research_ready'
   | 'plan_ready'

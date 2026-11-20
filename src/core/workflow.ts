@@ -3,6 +3,7 @@ import type {
   AgentMentionSpan,
   AgentRole,
   BuildArtifact,
+  CollaborationStepState,
   ProductPlan,
   Project,
   RaceBranch,
@@ -26,6 +27,7 @@ import {
   buildIntentRouterPrompt,
   buildIrisDiscussPrompt,
   buildIrisPrompt,
+  buildMultiMentionPlannerPrompt,
 } from './roles';
 import {
   getRaceDirectionsForPlan,
@@ -38,8 +40,11 @@ import {
   alexFilesOutputSchema,
   intentRouteSchema,
   mergeVirtualFS,
+  multiMentionPlanSchema,
   productPlanSchema,
   researchOutputSchema,
+  type AgentReplyOutput,
+  type MultiMentionPlanOutput,
 } from './schemas';
 import {
   getMutationBlockReason,
@@ -113,44 +118,181 @@ function stripMentionSpans(text: string, spans: AgentMentionSpan[]): string {
   return result.replace(/^[\s:：,，-]+/, '').replace(/\s{2,}/g, ' ').trim() || text;
 }
 
-function parseExplicitMention(raw: string): {
-  role: 'iris' | 'emma' | 'alex' | null;
+function parseExplicitMentions(raw: string): {
+  spans: AgentMentionSpan[];
   cleanedText: string;
-  span?: AgentMentionSpan;
 } {
   const trimmed = raw.trim();
-  const match = trimmed.match(
-    /(^|\s)@(iris|emma|alex|产品经理|产品|调研员|调研|全栈工程师|全栈|开发)(?=$|[\s:：,，。.!?！？-])/i
-  );
-  if (!match || match.index === undefined) {
-    return { role: null, cleanedText: trimmed };
+  const regex =
+    /(^|\s)@(iris|emma|alex|产品经理|产品|调研员|调研|全栈工程师|全栈|开发)(?=$|[\s:：,，。.!?！？-])/gi;
+  const spans: AgentMentionSpan[] = [];
+
+  for (const match of trimmed.matchAll(regex)) {
+    if (match.index === undefined) continue;
+    const token = match[2].toLowerCase();
+    const tokenStart = match.index + match[1].length;
+    const tokenEnd = match.index + match[0].length;
+    const label = trimmed.slice(tokenStart, tokenEnd);
+    const role: 'iris' | 'emma' | 'alex' =
+      token === 'iris' || token.startsWith('调研')
+        ? 'iris'
+        : token === 'emma' || token.startsWith('产品')
+          ? 'emma'
+          : 'alex';
+    spans.push({ role, label, start: tokenStart, end: tokenEnd });
+    if (spans.length >= 10) break;
   }
-  const token = match[2].toLowerCase();
-  const tokenStart = match.index + match[1].length;
-  const tokenEnd = match.index + match[0].length;
-  const label = trimmed.slice(tokenStart, tokenEnd);
-  const afterToken = trimmed.slice(tokenEnd).replace(/^[\s:：,，-]+/, ' ');
-  const cleanedText =
-    `${trimmed.slice(0, tokenStart)}${afterToken}`.replace(/\s{2,}/g, ' ').trim() ||
-    trimmed;
-  const role: 'iris' | 'emma' | 'alex' =
-    token === 'iris' || token.startsWith('调研')
-      ? 'iris'
-      : token === 'emma' || token.startsWith('产品')
-        ? 'emma'
-        : 'alex';
+
   return {
-    role,
-    cleanedText,
-    span: { role, label, start: tokenStart, end: tokenEnd },
+    spans,
+    cleanedText: spans.length > 0 ? stripMentionSpans(trimmed, spans) : trimmed,
   };
+}
+
+function normalizeMultiMentionPlan(
+  rawPlan: MultiMentionPlanOutput,
+  mentionedRoles: Array<'iris' | 'emma' | 'alex'>,
+  fallbackInstruction: string
+): CollaborationStepState[] {
+  const mentionedSet = new Set(mentionedRoles);
+  const byRole = new Map<
+    'iris' | 'emma' | 'alex',
+    MultiMentionPlanOutput['steps'][number]
+  >();
+  for (const step of rawPlan.steps) {
+    if (mentionedSet.has(step.role) && !byRole.has(step.role)) {
+      byRole.set(step.role, step);
+    }
+  }
+
+  const normalized: CollaborationStepState[] = [];
+  for (const role of mentionedRoles) {
+    const rawStep = byRole.get(role);
+    const subTask = rawStep?.subTask?.trim() || fallbackInstruction;
+    let dependsOn: Array<'iris' | 'emma'> = [];
+    if (role === 'emma' && mentionedSet.has('iris')) {
+      dependsOn = rawStep?.dependsOn?.includes('iris') ? ['iris'] : [];
+    } else if (role === 'alex') {
+      const seen = new Set<'iris' | 'emma'>();
+      for (const dep of rawStep?.dependsOn ?? []) {
+        if ((dep === 'iris' || dep === 'emma') && mentionedSet.has(dep) && !seen.has(dep)) {
+          seen.add(dep);
+          dependsOn.push(dep);
+        }
+      }
+    }
+    normalized.push({
+      stepId: `step-${role}`,
+      role,
+      subTask,
+      dependsOn,
+      status: 'pending',
+      requireConfirmBeforeRun:
+        role === 'alex' && dependsOn.length > 0 && Boolean(rawStep?.requireConfirmBeforeRun),
+    });
+  }
+
+  const wave1 = normalized.filter((s) => s.role !== 'alex' && s.dependsOn.length === 0);
+  if (wave1.length >= 2) {
+    for (const s of wave1) {
+      s.parallelGroup = 1;
+    }
+  }
+  const wave2 = normalized.filter((s) => s.role !== 'alex' && s.dependsOn.length > 0);
+  const wave3 = normalized.filter((s) => s.role === 'alex');
+  return [...wave1, ...wave2, ...wave3];
+}
+
+function buildFallbackMultiMentionPlan(
+  mentionedRoles: Array<'iris' | 'emma' | 'alex'>,
+  fallbackInstruction: string
+): { rationale: string; steps: CollaborationStepState[] } {
+  const mentionedSet = new Set(mentionedRoles);
+  const steps: CollaborationStepState[] = [];
+  if (mentionedSet.has('iris')) {
+    steps.push({
+      stepId: 'step-iris',
+      role: 'iris',
+      subTask: fallbackInstruction,
+      dependsOn: [],
+      status: 'pending',
+    });
+  }
+  if (mentionedSet.has('emma')) {
+    steps.push({
+      stepId: 'step-emma',
+      role: 'emma',
+      subTask: fallbackInstruction,
+      dependsOn: mentionedSet.has('iris') ? ['iris'] : [],
+      status: 'pending',
+    });
+  }
+  if (mentionedSet.has('alex')) {
+    const upstream: Array<'iris' | 'emma'> = [];
+    if (mentionedSet.has('iris')) upstream.push('iris');
+    if (mentionedSet.has('emma')) upstream.push('emma');
+    steps.push({
+      stepId: 'step-alex',
+      role: 'alex',
+      subTask: fallbackInstruction,
+      dependsOn: upstream,
+      status: 'pending',
+      requireConfirmBeforeRun: mentionedSet.has('emma'),
+    });
+  }
+  return {
+    rationale: '按团队协同职责分步推进',
+    steps,
+  };
+}
+
+function formatUpstreamReplyForContext(
+  role: 'iris' | 'emma',
+  reply: AgentReplyOutput
+): string {
+  const speaker = role === 'iris' ? 'Iris' : 'Emma';
+  const topOpt = reply.options?.[0];
+  const optText = topOpt
+    ? ` [推荐方案 ${topOpt.title}: ${topOpt.executeInstruction}]`
+    : '';
+  return `${speaker}: ${reply.reply.trim()}${optText}`;
+}
+
+function buildAlexMultiAgentInstruction(
+  alexStep: CollaborationStepState,
+  upstreamReplies: Partial<Record<'iris' | 'emma', AgentReplyOutput>>
+): string {
+  if (alexStep.dependsOn.length === 0) {
+    return alexStep.subTask;
+  }
+  const decisions: string[] = [];
+  for (const dep of alexStep.dependsOn) {
+    const reply = upstreamReplies[dep];
+    if (!reply) continue;
+    const speaker = dep === 'iris' ? 'Iris' : 'Emma';
+    decisions.push(`- ${speaker} 结论：${reply.reply.trim()}`);
+    if (reply.options?.[0]) {
+      decisions.push(
+        `- 推荐落实方案「${reply.options[0].title}」：${reply.options[0].executeInstruction}`
+      );
+    }
+  }
+  if (decisions.length === 0) {
+    return alexStep.subTask;
+  }
+  return `${alexStep.subTask}\n\n请结合并落实以下协同结论：\n${decisions.join('\n')}`;
 }
 
 function formatRecentConversationContext(events: AgentEvent[]): string {
   const lines: string[] = [];
   for (const ev of events) {
     const payload = (ev.payload ?? {}) as Record<string, unknown>;
-    if (ev.type === 'role_start') {
+    if (ev.type === 'collaboration_plan') {
+      if (typeof payload.instruction === 'string' && payload.instruction.trim()) {
+        lines.push(`User: ${payload.instruction.trim()}`);
+      }
+    } else if (ev.type === 'role_start') {
+      if (payload.continuation === true) continue;
       const msg =
         typeof payload.instruction === 'string'
           ? payload.instruction
@@ -758,13 +900,454 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
       };
       const recentContext = formatRecentConversationContext(existingEvents);
 
+      const ds = project.plan.designSystem;
+      const designSummary = ds
+        ? `场景 ${ds.scenario} ${ds.scenarioName}（${ds.colorMode}），主色 ${ds.palette.accent}，背景 ${ds.palette.background}${ds.themeName ? `，主题「${ds.themeName}」` : ''}`
+        : undefined;
+
       const hasExplicitMentionsParam = opts?.mentions !== undefined;
       const structuredMentions = hasExplicitMentionsParam
         ? normalizeMentionSpans(opts!.mentions!, rawInstruction, leadingTrim)
         : [];
-      const fallbackMention = hasExplicitMentionsParam
-        ? { role: null as 'iris' | 'emma' | 'alex' | null, cleanedText: rawInstruction, span: undefined }
-        : parseExplicitMention(rawInstruction);
+      const fallbackParsedMentions = hasExplicitMentionsParam
+        ? { spans: [] as AgentMentionSpan[], cleanedText: rawInstruction }
+        : parseExplicitMentions(rawInstruction);
+      const effectiveMentions = hasExplicitMentionsParam
+        ? structuredMentions
+        : fallbackParsedMentions.spans;
+
+      const uniqueMentionRoles: Array<'iris' | 'emma' | 'alex'> = [];
+      for (const span of effectiveMentions) {
+        if (!uniqueMentionRoles.includes(span.role)) {
+          uniqueMentionRoles.push(span.role);
+        }
+      }
+
+      if (uniqueMentionRoles.length >= 2) {
+        let rationale = '按团队协同职责分工推进';
+        let steps: CollaborationStepState[];
+        try {
+          const planned = await this.llm.generateObject({
+            ...buildMultiMentionPlannerPrompt({
+              plan: project.plan,
+              designSummary,
+              recentContext,
+              message: rawInstruction,
+              mentionedRoles: uniqueMentionRoles,
+            }),
+            schema: multiMentionPlanSchema,
+            model: opts?.model,
+            abortSignal: opts?.signal,
+          });
+          rationale = planned.rationale.trim() || rationale;
+          steps = normalizeMultiMentionPlan(
+            planned,
+            uniqueMentionRoles,
+            rawInstruction
+          );
+        } catch (planErr) {
+          if (opts?.signal?.aborted) {
+            throw planErr;
+          }
+          const planMsg =
+            planErr instanceof Error ? planErr.message : String(planErr);
+          console.warn(
+            `[Workflow] multi-mention orchestrator failed project=${projectId} model=${modelLabel}, using fallback plan: ${planMsg}`
+          );
+          const fb = buildFallbackMultiMentionPlan(
+            uniqueMentionRoles,
+            rawInstruction
+          );
+          rationale = fb.rationale;
+          steps = fb.steps;
+        }
+
+        const turnId = `turn_${globalThis.crypto.randomUUID().slice(0, 8)}`;
+        const upstreamReplies: Partial<Record<'iris' | 'emma', AgentReplyOutput>> =
+          {};
+        const emit = (ev: Omit<AgentEvent, 'seq' | 'timestamp'>) =>
+          this.emitAndPersist(projectId, getSeq, ev);
+
+        console.log(
+          `[Workflow] multi-agent turn=${turnId} project=${projectId} roles=${steps.map((s) => s.role).join('->')} model=${modelLabel}`
+        );
+
+        yield await emit({
+          role: 'system',
+          type: 'collaboration_plan',
+          payload: {
+            turnId,
+            instruction: rawInstruction,
+            mentions: effectiveMentions,
+            rationale,
+            steps,
+          },
+        });
+
+        const confirmedPlan = project.plan;
+        const llm = this.llm;
+        const runReadOnlyWave = async function* (
+          waveSteps: CollaborationStepState[]
+        ): AsyncGenerator<AgentEvent> {
+          if (waveSteps.length === 0) return;
+
+          for (const step of waveSteps) {
+            yield await emit({
+              role: 'system',
+              type: 'collaboration_step',
+              payload: {
+                turnId,
+                stepId: step.stepId,
+                role: step.role,
+                status: 'running',
+              },
+            });
+            yield await emit({
+              role: step.role,
+              type: 'role_start',
+              payload: {
+                continuation: true,
+                turnId,
+                label:
+                  step.role === 'emma'
+                    ? 'Emma 正在协同梳理产品与视觉建议...'
+                    : 'Iris 正在协同开展调研分析...',
+                instruction: rawInstruction,
+                subTask: step.subTask,
+                targetRole: step.role,
+                intent: step.role === 'emma' ? 'discuss' : 'research',
+                routeReason: rationale,
+                explicit: true,
+              },
+            });
+          }
+
+          type WaveOutcome = {
+            step: CollaborationStepState;
+            reply?: AgentReplyOutput;
+            error?: string;
+            aborted?: boolean;
+          };
+          const pending = new Map<string, Promise<[string, WaveOutcome]>>();
+
+          for (const step of waveSteps) {
+            const depNotes = step.dependsOn
+              .map((dep) => {
+                const up = upstreamReplies[dep];
+                return up ? formatUpstreamReplyForContext(dep, up) : '';
+              })
+              .filter(Boolean);
+            const stepContext = [recentContext, ...depNotes]
+              .filter((s) => s.trim().length > 0)
+              .join('\n');
+            const promptSpec =
+              step.role === 'emma'
+                ? buildEmmaDiscussPrompt({
+                    plan: confirmedPlan,
+                    designMd: rollbackFiles['DESIGN.md'],
+                    recentContext: stepContext || undefined,
+                    message: step.subTask,
+                  })
+                : buildIrisDiscussPrompt({
+                    plan: confirmedPlan,
+                    recentContext: stepContext || undefined,
+                    message: step.subTask,
+                  });
+
+            const promise: Promise<[string, WaveOutcome]> = llm
+              .generateObject({
+                ...promptSpec,
+                schema: agentReplySchema,
+                model: opts?.model,
+                abortSignal: opts?.signal,
+              })
+              .then((reply): [string, WaveOutcome] => [
+                step.stepId,
+                { step, reply },
+              ])
+              .catch((err): [string, WaveOutcome] => {
+                if (opts?.signal?.aborted) {
+                  return [
+                    step.stepId,
+                    {
+                      step,
+                      aborted: true,
+                      error: err instanceof Error ? err.message : String(err),
+                    },
+                  ];
+                }
+                return [
+                  step.stepId,
+                  {
+                    step,
+                    error: err instanceof Error ? err.message : String(err),
+                  },
+                ];
+              });
+            pending.set(step.stepId, promise);
+          }
+
+          while (pending.size > 0) {
+            const [doneKey, outcome] = await Promise.race(pending.values());
+            pending.delete(doneKey);
+            if (outcome.aborted) {
+              throw (
+                opts?.signal?.reason ??
+                new Error(outcome.error || 'LLM request aborted')
+              );
+            }
+            if (
+              outcome.reply &&
+              (outcome.step.role === 'iris' || outcome.step.role === 'emma')
+            ) {
+              upstreamReplies[outcome.step.role] = outcome.reply;
+              yield await emit({
+                role: outcome.step.role,
+                type: 'agent_message',
+                payload: {
+                  ...outcome.reply,
+                  routeReason: rationale,
+                  intent: outcome.step.role === 'emma' ? 'discuss' : 'research',
+                  explicit: true,
+                },
+              });
+              yield await emit({
+                role: 'system',
+                type: 'collaboration_step',
+                payload: {
+                  turnId,
+                  stepId: outcome.step.stepId,
+                  role: outcome.step.role,
+                  status: 'completed',
+                },
+              });
+            } else {
+              const errMsg = outcome.error || '协同分析阶段执行失败';
+              yield await emit({
+                role: 'system',
+                type: 'collaboration_step',
+                payload: {
+                  turnId,
+                  stepId: outcome.step.stepId,
+                  role: outcome.step.role,
+                  status: 'failed',
+                  error: errMsg,
+                },
+              });
+              yield await emit({
+                role: outcome.step.role,
+                type: 'error',
+                payload: { message: errMsg },
+              });
+            }
+          }
+        };
+
+        const wave1 = steps.filter(
+          (s) => s.role !== 'alex' && s.dependsOn.length === 0
+        );
+        const wave2 = steps.filter(
+          (s) => s.role !== 'alex' && s.dependsOn.length > 0
+        );
+        const alexStep = steps.find((s) => s.role === 'alex');
+
+        yield* runReadOnlyWave(wave1);
+        yield* runReadOnlyWave(wave2);
+
+        if (!alexStep) {
+          completed = true;
+          console.log(
+            `[Workflow] multi-agent discussion done turn=${turnId} project=${projectId} elapsed=${Date.now() - started}ms`
+          );
+          yield await emit({
+            role: 'system',
+            type: 'done',
+            payload: { status: previousStatus, multiAgent: true, turnId },
+          });
+          return;
+        }
+
+        const alexHandoff = buildAlexMultiAgentInstruction(
+          alexStep,
+          upstreamReplies
+        );
+        if (alexStep.requireConfirmBeforeRun) {
+          yield await emit({
+            role: 'system',
+            type: 'collaboration_step',
+            payload: {
+              turnId,
+              stepId: alexStep.stepId,
+              role: 'alex',
+              status: 'awaiting_confirmation',
+              handoffInstruction: alexHandoff,
+            },
+          });
+          completed = true;
+          console.log(
+            `[Workflow] multi-agent paused for confirmation turn=${turnId} project=${projectId} elapsed=${Date.now() - started}ms`
+          );
+          yield await emit({
+            role: 'system',
+            type: 'done',
+            payload: {
+              status: previousStatus,
+              multiAgent: true,
+              awaitingConfirmation: true,
+              turnId,
+            },
+          });
+          return;
+        }
+
+        yield await emit({
+          role: 'system',
+          type: 'collaboration_step',
+          payload: {
+            turnId,
+            stepId: alexStep.stepId,
+            role: 'alex',
+            status: 'running',
+            handoffInstruction: alexHandoff,
+          },
+        });
+        yield await emit({
+          role: 'alex',
+          type: 'role_start',
+          payload: {
+            continuation: true,
+            turnId,
+            label: 'Alex 正在按协作分工修改代码...',
+            instruction: rawInstruction,
+            subTask: alexStep.subTask,
+            targetRole: 'alex',
+            intent: 'implement',
+            routeReason: rationale,
+            explicit: true,
+          },
+        });
+
+        try {
+          await this.repo.saveDraft(projectId, rollbackFiles, 'building');
+          statusDirty = true;
+
+          const alexDepNotes = alexStep.dependsOn
+            .map((dep) => {
+              const up = upstreamReplies[dep];
+              return up ? formatUpstreamReplyForContext(dep, up) : '';
+            })
+            .filter(Boolean);
+          const alexContext = [recentContext, ...alexDepNotes]
+            .filter((s) => s.trim().length > 0)
+            .join('\n');
+
+          const buffered: Array<{
+            role: AgentRole;
+            type: AgentEvent['type'];
+            payload: unknown;
+            branchId?: string;
+          }> = [];
+
+          const { files, artifact } = await this.buildWithAutoFix({
+            projectId,
+            plan: project.plan,
+            baseFiles: rollbackFiles,
+            initialPrompt: buildAlexIteratePrompt({
+              plan: project.plan,
+              files: rollbackFiles,
+              instruction: alexHandoff,
+              recentContext: alexContext || undefined,
+            }),
+            model: opts?.model,
+            abortSignal: opts?.signal,
+            onEvent: (ev) => {
+              buffered.push(ev);
+            },
+          });
+
+          for (const ev of buffered) {
+            yield await emit(ev);
+          }
+
+          const finalIterFiles =
+            rollbackFiles['DESIGN.md']?.trim() && !files['DESIGN.md']?.trim()
+              ? { ...files, 'DESIGN.md': rollbackFiles['DESIGN.md'] }
+              : files;
+          const nextStatus = artifact.ok ? 'ready' : 'error';
+          await this.repo.saveDraft(projectId, finalIterFiles, nextStatus);
+
+          yield await emit({
+            role: 'system',
+            type: 'collaboration_step',
+            payload: {
+              turnId,
+              stepId: alexStep.stepId,
+              role: 'alex',
+              status: artifact.ok ? 'completed' : 'failed',
+              handoffInstruction: alexHandoff,
+              ...(artifact.ok
+                ? {}
+                : {
+                    error: artifact.errors[0]?.message ?? '编译未通过',
+                  }),
+            },
+          });
+
+          completed = true;
+          console.log(
+            `[Workflow] multi-agent alex done turn=${turnId} project=${projectId} status=${nextStatus} elapsed=${Date.now() - started}ms`
+          );
+          yield await emit({
+            role: 'system',
+            type: 'done',
+            payload: {
+              status: nextStatus,
+              routedRole: 'alex',
+              multiAgent: true,
+              turnId,
+            },
+          });
+          return;
+        } catch (alexErr) {
+          if (opts?.signal?.aborted) {
+            throw alexErr;
+          }
+          const alexMsg =
+            alexErr instanceof Error ? alexErr.message : String(alexErr);
+          console.warn(
+            `[Workflow] multi-agent alex failed turn=${turnId} project=${projectId}, preserving upstream replies: ${alexMsg}`
+          );
+          await this.repo
+            .saveDraft(projectId, rollbackFiles, restoreStatus)
+            .catch(() => undefined);
+          statusDirty = false;
+          yield await emit({
+            role: 'system',
+            type: 'collaboration_step',
+            payload: {
+              turnId,
+              stepId: alexStep.stepId,
+              role: 'alex',
+              status: 'failed',
+              error: alexMsg,
+              handoffInstruction: alexHandoff,
+            },
+          });
+          yield await emit({
+            role: 'system',
+            type: 'error',
+            payload: { message: alexMsg },
+          });
+          completed = true;
+          yield await emit({
+            role: 'system',
+            type: 'done',
+            payload: { status: restoreStatus, multiAgent: true, turnId },
+          });
+          return;
+        }
+      }
+
       const explicitArgRole =
         opts?.targetRole && opts.targetRole !== 'auto' ? opts.targetRole : null;
 
@@ -777,10 +1360,10 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
       let cleanInstruction = rawInstruction;
       let persistedMentions: AgentMentionSpan[] = [];
 
-      if (structuredMentions.length > 0) {
-        const primaryRole = structuredMentions[0].role;
-        cleanInstruction = stripMentionSpans(rawInstruction, structuredMentions);
-        persistedMentions = structuredMentions;
+      if (effectiveMentions.length > 0) {
+        const primaryRole = effectiveMentions[0].role;
+        cleanInstruction = stripMentionSpans(rawInstruction, effectiveMentions);
+        persistedMentions = effectiveMentions;
         routed = {
           targetRole: primaryRole,
           intent:
@@ -790,20 +1373,6 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
                 ? 'discuss'
                 : 'implement',
           reason: `用户通过 @ 提及指定 ${primaryRole}`,
-          explicit: true,
-        };
-      } else if (fallbackMention.role) {
-        cleanInstruction = fallbackMention.cleanedText;
-        persistedMentions = fallbackMention.span ? [fallbackMention.span] : [];
-        routed = {
-          targetRole: fallbackMention.role,
-          intent:
-            fallbackMention.role === 'iris'
-              ? 'research'
-              : fallbackMention.role === 'emma'
-                ? 'discuss'
-                : 'implement',
-          reason: `用户通过 @ 提及指定 ${fallbackMention.role}`,
           explicit: true,
         };
       } else if (explicitArgRole) {
@@ -820,10 +1389,6 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
           explicit: true,
         };
       } else {
-        const ds = project.plan.designSystem;
-        const designSummary = ds
-          ? `场景 ${ds.scenario} ${ds.scenarioName}（${ds.colorMode}），主色 ${ds.palette.accent}，背景 ${ds.palette.background}${ds.themeName ? `，主题「${ds.themeName}」` : ''}`
-          : undefined;
         try {
           const decision = await this.llm.generateObject({
             ...buildIntentRouterPrompt({

@@ -13,6 +13,8 @@ export {
   designSystemSchema,
   intentRouteSchema,
   mergeVirtualFS,
+  multiMentionPlanSchema,
+  multiMentionStepSchema,
   normalizePath,
   productPlanSchema,
   researchOutputSchema,
@@ -20,6 +22,7 @@ export {
   type AgentReplyOutput,
   type AlexFilesOutput,
   type IntentRouteOutput,
+  type MultiMentionPlanOutput,
   type ResearchOutput,
 } from './schemas';
 export { ATOMS_CLOUD_SDK_SOURCE, getCloudSdkPromptDocs } from './sdk-client';
@@ -33,6 +36,7 @@ export {
   buildIntentRouterPrompt,
   buildIrisDiscussPrompt,
   buildIrisPrompt,
+  buildMultiMentionPlannerPrompt,
 } from './roles';
 export {
   DESIGN_SCENARIOS,

@@ -782,6 +782,98 @@ export class MockLLMProvider implements LLMProvider {
         input.abortSignal.reason ?? new Error('LLM request aborted')
       );
     }
+    if (input.system.startsWith('You are the Multi-Agent Orchestrator')) {
+      const msg = extractSection(input.prompt, 'User Message:');
+      const rawRoles = extractSection(
+        input.prompt,
+        'Mentioned Roles:',
+        '\n\nUser Message:'
+      );
+      const roles = rawRoles
+        .split(',')
+        .map((r) => r.trim())
+        .filter(
+          (r): r is 'iris' | 'emma' | 'alex' =>
+            r === 'iris' || r === 'emma' || r === 'alex'
+        );
+
+      const hasIris = roles.includes('iris');
+      const hasEmma = roles.includes('emma');
+      const hasAlex = roles.includes('alex');
+
+      const emmaDependsOnIris =
+        hasIris &&
+        /(基于|根据|结合|然后|再由|再让|先.*再|按.*方案)/.test(msg);
+
+      const segments = msg
+        .split(/[;；\n]+/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const independentAlexSegment =
+        segments.length >= 2
+          ? segments.find(
+              (seg) =>
+                /(alex|全栈|开发)/i.test(seg) &&
+                /(标题|按钮|深蓝|配色|颜色|csv|导出|改成|增加|添加|新增)/i.test(seg) &&
+                !/(按方案|按.*建议|根据|结合|合适|确认|敲定|再改|再让)/i.test(seg)
+            )
+          : undefined;
+      const alexDependsOn: Array<'iris' | 'emma'> = independentAlexSegment
+        ? []
+        : roles.filter((r): r is 'iris' | 'emma' => r !== 'alex');
+
+      const exploratory =
+        /(讨论|商量|评估|先看|先给|合适.*再|敲定后|确认后|可选方案|先出.*方案)/.test(
+          msg
+        ) &&
+        !/(直接改|直接实现|直接落地|顺手实现|直接按)/.test(msg);
+
+      const steps: Array<{
+        role: 'iris' | 'emma' | 'alex';
+        subTask: string;
+        dependsOn: Array<'iris' | 'emma'>;
+        requireConfirmBeforeRun?: boolean;
+      }> = [];
+
+      if (hasIris) {
+        steps.push({
+          role: 'iris',
+          subTask: '调研同类产品的行业做法、用户留存要点与可行策略',
+          dependsOn: [],
+        });
+      }
+      if (hasEmma) {
+        steps.push({
+          role: 'emma',
+          subTask: emmaDependsOnIris
+            ? '结合调研洞察梳理产品设计方向与可执行方案'
+            : '从产品体验与视觉设计角度给出方案建议',
+          dependsOn: emmaDependsOnIris ? ['iris'] : [],
+        });
+      }
+      if (hasAlex) {
+        steps.push({
+          role: 'alex',
+          subTask: independentAlexSegment
+            ? independentAlexSegment.replace(/@[a-zA-Z\u4e00-\u9fa5]+/g, '').trim() || msg
+            : '落实前序方案并完成页面代码与样式迭代',
+          dependsOn: alexDependsOn,
+          requireConfirmBeforeRun: alexDependsOn.length > 0 && exploratory,
+        });
+      }
+
+      const rationale =
+        hasIris && hasEmma && !emmaDependsOnIris && !hasAlex
+          ? 'Iris 与 Emma 从调研和产品双视角并行分析'
+          : hasAlex && exploratory && alexDependsOn.length > 0
+            ? '上游先产出方案并暂停确认，审阅后由 Alex 改代码'
+            : hasAlex && alexDependsOn.length === 0
+              ? '前序分析与 Alex 独立改动需求互不阻塞，分步落地'
+              : '按 Iris → Emma → Alex 顺序承接上下文并完成闭环交付';
+
+      return input.schema.parse({ rationale, steps });
+    }
+
     if (input.system.startsWith('You are the Intent Router')) {
       const msg = extractSection(input.prompt, 'User Message:');
       const isResearch =

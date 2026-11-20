@@ -1800,4 +1800,283 @@ export default function App() {
       (await repo.getById(project.id))?.draftFiles['src/App.tsx']
     ).toContain('bg-blue-800');
   });
+
+  it('orchestrates multi-@mention teams with 2A parallel/serial handoff, 1A confirmation gate, and partial-success safety', async () => {
+    const repo = new MemoryProjectRepository();
+    const baseMock = new MockLLMProvider();
+
+    let trackParallel = false;
+    let throwOnAlex = false;
+    const inFlight: string[] = [];
+    const maxConcurrentPair: string[] = [];
+    const callOrder: string[] = [];
+    const capturedPrompts: Array<{ tag: string; prompt: string }> = [];
+
+    const spyLlm: LLMProvider = {
+      listModels: () => baseMock.listModels(),
+      generateObject: async (input) => {
+        const tag = input.system.startsWith('You are the Multi-Agent Orchestrator')
+          ? 'orchestrator'
+          : input.system.startsWith('You are Emma, discussing')
+            ? 'emma_discuss'
+            : input.system.startsWith('You are Iris, answering')
+              ? 'iris_discuss'
+              : input.system.startsWith('You are Alex')
+                ? 'alex'
+                : 'other';
+
+        callOrder.push(tag);
+        capturedPrompts.push({ tag, prompt: input.prompt });
+
+        if (trackParallel && (tag === 'iris_discuss' || tag === 'emma_discuss')) {
+          inFlight.push(tag);
+          if (inFlight.length >= maxConcurrentPair.length) {
+            maxConcurrentPair.splice(0, maxConcurrentPair.length, ...inFlight);
+          }
+          await new Promise((r) => setTimeout(r, tag === 'iris_discuss' ? 35 : 10));
+          const idx = inFlight.indexOf(tag);
+          if (idx >= 0) inFlight.splice(idx, 1);
+        }
+
+        if (throwOnAlex && tag === 'alex') {
+          throw new Error('Simulated Alex generation outage');
+        }
+
+        return baseMock.generateObject(input);
+      },
+      streamText: (input) => baseMock.streamText(input),
+    };
+
+    const workflow = new AtomsWorkflowEngine({
+      repo,
+      llm: spyLlm,
+      builder: new EsbuildStaticBuilder(),
+      publisher: new SameOriginSitePublisher(repo, 'http://localhost:3000'),
+      apiBaseUrl: 'http://localhost:3000',
+    });
+
+    const project = await repo.create({
+      title: '沙龙协作站',
+      slug: 'multi-mention-test',
+    });
+    await collect(
+      workflow.start(project.id, '做一个活动报名与签到站', { model: 'mock-fast' })
+    );
+    await collect(
+      workflow.confirmPlan(project.id, { mode: 'linear', model: 'mock-fast' })
+    );
+
+    const baselineApp = (await repo.getById(project.id))?.draftFiles['src/App.tsx'];
+    expect(baselineApp).toBeTruthy();
+
+    // 1. 2A Parallel @Iris + @Emma (independent angles -> dependsOn: [])
+    trackParallel = true;
+    callOrder.length = 0;
+    inFlight.length = 0;
+    maxConcurrentPair.length = 0;
+    const p1Text = '@Iris 分析同类活动站留存要点；@Emma 从界面体验角度给配色建议';
+    const p1Events = await collect(
+      workflow.iterate(project.id, p1Text, {
+        model: 'mock-fast',
+        mentions: [
+          { role: 'iris', label: '@Iris', start: 0, end: 5 },
+          {
+            role: 'emma',
+            label: '@Emma',
+            start: p1Text.indexOf('@Emma'),
+            end: p1Text.indexOf('@Emma') + 5,
+          },
+        ],
+      })
+    );
+    trackParallel = false;
+
+    expect(callOrder[0]).toBe('orchestrator');
+    expect(maxConcurrentPair).toContain('iris_discuss');
+    expect(maxConcurrentPair).toContain('emma_discuss');
+
+    const parallelPlan = p1Events.find((ev) => ev.type === 'collaboration_plan')
+      ?.payload as {
+      steps: Array<{ role: string; parallelGroup?: number; dependsOn: string[] }>;
+    };
+    expect(parallelPlan.steps.every((s) => s.parallelGroup === 1)).toBe(true);
+    expect(
+      p1Events.filter(
+        (ev) =>
+          ev.type === 'role_start' &&
+          (ev.payload as { continuation?: boolean }).continuation === true
+      )
+    ).toHaveLength(2);
+    expect(p1Events.filter((ev) => ev.type === 'agent_message')).toHaveLength(2);
+    expect(
+      p1Events.filter(
+        (ev) =>
+          ev.type === 'collaboration_step' &&
+          (ev.payload as { status?: string }).status === 'completed'
+      )
+    ).toHaveLength(2);
+    expect((await repo.getById(project.id))?.draftFiles['src/App.tsx']).toBe(
+      baselineApp
+    );
+
+    // 2. 2A Serial Handoff @Iris -> @Emma (dependent -> Emma receives Iris reply context)
+    callOrder.length = 0;
+    capturedPrompts.length = 0;
+    const p2Text =
+      '@Iris 调研留存策略，再由 @Emma 结合调研结论梳理界面改进方案';
+    const p2Events = await collect(
+      workflow.iterate(project.id, p2Text, {
+        model: 'mock-fast',
+        mentions: [
+          { role: 'iris', label: '@Iris', start: 0, end: 5 },
+          {
+            role: 'emma',
+            label: '@Emma',
+            start: p2Text.indexOf('@Emma'),
+            end: p2Text.indexOf('@Emma') + 5,
+          },
+        ],
+      })
+    );
+    expect(callOrder).toEqual(['orchestrator', 'iris_discuss', 'emma_discuss']);
+    const emmaSerialPrompt =
+      capturedPrompts.find((c) => c.tag === 'emma_discuss')?.prompt ?? '';
+    expect(emmaSerialPrompt).toContain('Iris:');
+    expect(emmaSerialPrompt).toContain('首屏即用免注册体验');
+    expect(
+      (
+        p2Events.find((ev) => ev.type === 'collaboration_plan')?.payload as {
+          steps: Array<{ role: string; dependsOn: string[] }>;
+        }
+      ).steps.find((s) => s.role === 'emma')?.dependsOn
+    ).toEqual(['iris']);
+
+    // 3. 1A Exploratory Gate @Emma + @Alex (pauses before Alex writes code)
+    callOrder.length = 0;
+    const p3Text =
+      '先请 @Emma 讨论几套深蓝清爽配色方案，合适再让 @Alex 改代码';
+    const p3Events = await collect(
+      workflow.iterate(project.id, p3Text, {
+        model: 'mock-fast',
+        mentions: [
+          {
+            role: 'emma',
+            label: '@Emma',
+            start: p3Text.indexOf('@Emma'),
+            end: p3Text.indexOf('@Emma') + 5,
+          },
+          {
+            role: 'alex',
+            label: '@Alex',
+            start: p3Text.indexOf('@Alex'),
+            end: p3Text.indexOf('@Alex') + 5,
+          },
+        ],
+      })
+    );
+    expect(callOrder).toEqual(['orchestrator', 'emma_discuss']);
+    const alexGateEv = p3Events.find(
+      (ev) =>
+        ev.type === 'collaboration_step' &&
+        (ev.payload as { role?: string; status?: string }).role === 'alex' &&
+        (ev.payload as { status?: string }).status === 'awaiting_confirmation'
+    )?.payload as { status?: string; handoffInstruction?: string };
+    expect(alexGateEv?.status).toBe('awaiting_confirmation');
+    expect(alexGateEv?.handoffInstruction).toBeTruthy();
+    expect((await repo.getById(project.id))?.draftFiles['src/App.tsx']).toBe(
+      baselineApp
+    );
+
+    // 4. 1A Straight-Through @Emma + @Alex (decisive -> Emma hands off directly to Alex & compiles)
+    callOrder.length = 0;
+    capturedPrompts.length = 0;
+    const p4Text =
+      '@Emma 推荐一个深蓝配色方案并让 @Alex 直接按方案修改页面';
+    const p4Events = await collect(
+      workflow.iterate(project.id, p4Text, {
+        model: 'mock-fast',
+        mentions: [
+          { role: 'emma', label: '@Emma', start: 0, end: 5 },
+          {
+            role: 'alex',
+            label: '@Alex',
+            start: p4Text.indexOf('@Alex'),
+            end: p4Text.indexOf('@Alex') + 5,
+          },
+        ],
+      })
+    );
+    expect(callOrder).toEqual(['orchestrator', 'emma_discuss', 'alex']);
+    const alexPrompt =
+      capturedPrompts.find((c) => c.tag === 'alex')?.prompt ?? '';
+    expect(alexPrompt).toContain('Emma 结论');
+    expect(
+      p4Events.filter(
+        (ev) =>
+          ev.type === 'collaboration_step' &&
+          (ev.payload as { status?: string }).status === 'completed'
+      )
+    ).toHaveLength(2);
+    const updatedApp = (await repo.getById(project.id))?.draftFiles['src/App.tsx'];
+    expect(updatedApp).toContain('bg-blue-800');
+
+    // 5. Partial-Success Safety (Alex fails after Emma succeeds -> Emma persisted, draftFiles rolled back)
+    const eventCountBeforeFail = (await repo.listEvents(project.id)).length;
+    throwOnAlex = true;
+    const p5Events = await collect(
+      workflow.iterate(project.id, p4Text, {
+        model: 'mock-fast',
+        mentions: [
+          { role: 'emma', label: '@Emma', start: 0, end: 5 },
+          {
+            role: 'alex',
+            label: '@Alex',
+            start: p4Text.indexOf('@Alex'),
+            end: p4Text.indexOf('@Alex') + 5,
+          },
+        ],
+      })
+    );
+    throwOnAlex = false;
+    const alexFailStep = p5Events.find(
+      (ev) =>
+        ev.type === 'collaboration_step' &&
+        (ev.payload as { role?: string; status?: string }).role === 'alex' &&
+        (ev.payload as { status?: string }).status === 'failed'
+    )?.payload as { error?: string; handoffInstruction?: string };
+    expect(alexFailStep?.error).toContain('Simulated Alex generation outage');
+    expect(alexFailStep?.handoffInstruction).toBeTruthy();
+
+    const persistedAfterFail = (await repo.listEvents(project.id)).slice(
+      eventCountBeforeFail
+    );
+    expect(
+      persistedAfterFail.some(
+        (ev) => ev.type === 'agent_message' && ev.role === 'emma'
+      )
+    ).toBe(true);
+    const projectAfterFail = await repo.getById(project.id);
+    expect(projectAfterFail?.draftFiles['src/App.tsx']).toBe(updatedApp);
+    expect(projectAfterFail?.status).toBe('ready');
+
+    // 6. Duplicate Single-Role Mention (@Emma ... @Emma) -> NO orchestrator or collaboration_plan
+    callOrder.length = 0;
+    const dupText = '请 @Emma 看下布局，顺便 @Emma 也看看字体大小';
+    const firstEmmaStart = dupText.indexOf('@Emma');
+    const secondEmmaStart = dupText.lastIndexOf('@Emma');
+    const p6Events = await collect(
+      workflow.iterate(project.id, dupText, {
+        model: 'mock-fast',
+        mentions: [
+          { role: 'emma', label: '@Emma', start: firstEmmaStart, end: firstEmmaStart + 5 },
+          { role: 'emma', label: '@Emma', start: secondEmmaStart, end: secondEmmaStart + 5 },
+        ],
+      })
+    );
+    expect(callOrder).toEqual(['emma_discuss']);
+    expect(p6Events.some((ev) => ev.type === 'collaboration_plan')).toBe(false);
+    const dupRoleStart = p6Events.find((ev) => ev.type === 'role_start')
+      ?.payload as { mentions?: Array<{ role: string; start: number }> };
+    expect(dupRoleStart?.mentions).toHaveLength(2);
+  });
 });

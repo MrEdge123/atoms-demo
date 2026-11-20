@@ -6,15 +6,24 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  Clock,
   Code2,
   ExternalLink,
   Eye,
   FileCode,
+  Loader2,
   Rocket,
+  RotateCcw,
   Sparkles,
+  Users,
   Wrench,
 } from 'lucide-react';
-import type { AgentEvent, AgentMentionSpan, ProductPlan } from '@/domain';
+import type {
+  AgentEvent,
+  AgentMentionSpan,
+  CollaborationStepState,
+  ProductPlan,
+} from '@/domain';
 import type { ResearchOutput } from '@/core';
 import { AgentBadge } from './AtomsMark';
 import { RichMentionText } from './AgentMentionChip';
@@ -50,6 +59,15 @@ interface AgentReplyOption {
   executeInstruction: string;
 }
 
+interface CollaborationCardBlock {
+  kind: 'collaboration_plan';
+  key: string;
+  turnId: string;
+  rationale: string;
+  steps: CollaborationStepState[];
+  timestamp: string;
+}
+
 type TimelineItem =
   | {
       kind: 'user_prompt';
@@ -58,6 +76,7 @@ type TimelineItem =
       mentions?: AgentMentionSpan[];
       timestamp: string;
     }
+  | CollaborationCardBlock
   | {
       kind: 'iris_research';
       key: string;
@@ -92,9 +111,23 @@ type TimelineItem =
   | { kind: 'system_note'; key: string; message: string; timestamp: string }
   | { kind: 'error_card'; key: string; message: string; timestamp: string };
 
+function extractValidatedMentions(raw: unknown): AgentMentionSpan[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const filtered = (raw as AgentMentionSpan[]).filter(
+    (m) =>
+      m &&
+      (m.role === 'emma' || m.role === 'iris' || m.role === 'alex') &&
+      typeof m.label === 'string' &&
+      Number.isInteger(m.start) &&
+      Number.isInteger(m.end)
+  );
+  return filtered.length > 0 ? filtered : undefined;
+}
+
 function buildTimelineItems(events: AgentEvent[]): TimelineItem[] {
   const items: TimelineItem[] = [];
   let currentAlex: AlexRunBlock | null = null;
+  const collabByTurn = new Map<string, CollaborationCardBlock>();
 
   const flushAlex = () => {
     if (currentAlex) {
@@ -107,6 +140,74 @@ function buildTimelineItems(events: AgentEvent[]): TimelineItem[] {
     const ev = events[i];
     const payload = (ev.payload ?? {}) as Record<string, unknown>;
 
+    if (ev.type === 'collaboration_plan') {
+      flushAlex();
+      const turnId =
+        typeof payload.turnId === 'string' ? payload.turnId : `turn-${ev.seq}-${i}`;
+      const instruction =
+        typeof payload.instruction === 'string' ? payload.instruction.trim() : '';
+      const mentions = extractValidatedMentions(payload.mentions);
+      if (instruction) {
+        items.push({
+          kind: 'user_prompt',
+          key: `collab-user-${ev.seq}-${i}`,
+          text: instruction,
+          mentions,
+          timestamp: ev.timestamp,
+        });
+      }
+      const rawSteps = Array.isArray(payload.steps)
+        ? (payload.steps as CollaborationStepState[]).map((step) => ({
+            ...step,
+            dependsOn: Array.isArray(step.dependsOn) ? [...step.dependsOn] : [],
+          }))
+        : [];
+      const block: CollaborationCardBlock = {
+        kind: 'collaboration_plan',
+        key: `collab-${turnId}-${ev.seq}-${i}`,
+        turnId,
+        rationale:
+          typeof payload.rationale === 'string'
+            ? payload.rationale
+            : '按团队协同职责分工推进',
+        steps: rawSteps,
+        timestamp: ev.timestamp,
+      };
+      collabByTurn.set(turnId, block);
+      items.push(block);
+      continue;
+    }
+
+    if (ev.type === 'collaboration_step') {
+      const turnId = typeof payload.turnId === 'string' ? payload.turnId : '';
+      const stepId = typeof payload.stepId === 'string' ? payload.stepId : '';
+      const role = payload.role;
+      const status = payload.status;
+      const block = collabByTurn.get(turnId);
+      if (
+        block &&
+        (status === 'pending' ||
+          status === 'running' ||
+          status === 'completed' ||
+          status === 'awaiting_confirmation' ||
+          status === 'failed')
+      ) {
+        const target = block.steps.find(
+          (s) => (stepId && s.stepId === stepId) || (role && s.role === role)
+        );
+        if (target) {
+          target.status = status;
+          if (typeof payload.handoffInstruction === 'string') {
+            target.handoffInstruction = payload.handoffInstruction;
+          }
+          if (typeof payload.error === 'string') {
+            target.error = payload.error;
+          }
+        }
+      }
+      continue;
+    }
+
     if (ev.type === 'role_start') {
       if (ev.role === 'iris' && typeof payload.idea === 'string' && payload.idea.trim()) {
         flushAlex();
@@ -117,26 +218,16 @@ function buildTimelineItems(events: AgentEvent[]): TimelineItem[] {
           timestamp: ev.timestamp,
         });
       } else if (
+        payload.continuation !== true &&
         typeof payload.instruction === 'string' &&
         payload.instruction.trim()
       ) {
         flushAlex();
-        const rawMentions = Array.isArray(payload.mentions)
-          ? (payload.mentions as AgentMentionSpan[]).filter(
-              (m) =>
-                m &&
-                (m.role === 'emma' || m.role === 'iris' || m.role === 'alex') &&
-                typeof m.label === 'string' &&
-                Number.isInteger(m.start) &&
-                Number.isInteger(m.end)
-            )
-          : undefined;
         items.push({
           kind: 'user_prompt',
           key: `iter-${ev.seq}-${i}`,
           text: payload.instruction,
-          mentions:
-            rawMentions && rawMentions.length > 0 ? rawMentions : undefined,
+          mentions: extractValidatedMentions(payload.mentions),
           timestamp: ev.timestamp,
         });
       }
@@ -163,6 +254,20 @@ function buildTimelineItems(events: AgentEvent[]): TimelineItem[] {
     }
 
     if (ev.type === 'intent_routed') {
+      continue;
+    }
+
+    if (ev.type === 'error') {
+      flushAlex();
+      items.push({
+        kind: 'error_card',
+        key: `err-${ev.seq}-${i}`,
+        message:
+          typeof payload.message === 'string'
+            ? payload.message
+            : '执行过程中发生异常',
+        timestamp: ev.timestamp,
+      });
       continue;
     }
 
@@ -291,20 +396,6 @@ function buildTimelineItems(events: AgentEvent[]): TimelineItem[] {
         key: `pub-${ev.seq}-${i}`,
         version: Number(payload.version ?? 1),
         url: typeof payload.url === 'string' ? payload.url : '',
-        timestamp: ev.timestamp,
-      });
-      continue;
-    }
-
-    if (ev.type === 'error') {
-      flushAlex();
-      items.push({
-        kind: 'error_card',
-        key: `err-${ev.seq}-${i}`,
-        message:
-          typeof payload.message === 'string'
-            ? payload.message
-            : '执行过程中发生异常',
         timestamp: ev.timestamp,
       });
       continue;
@@ -667,14 +758,227 @@ function AgentReplyCard({
   );
 }
 
+const COLLAB_ROLE_META: Record<
+  CollaborationStepState['role'],
+  { label: string; dotColor: string }
+> = {
+  iris: { label: 'Iris 调研', dotColor: '#b88ade' },
+  emma: { label: 'Emma 产品', dotColor: '#ff7fa7' },
+  alex: { label: 'Alex 开发', dotColor: '#2ba3ff' },
+};
+
+function CollaborationStepStatusBadge({
+  status,
+}: {
+  status: CollaborationStepState['status'];
+}) {
+  if (status === 'running') {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-[#4267ff]/10 px-2 py-0.5 text-[10px] font-medium text-[#4267ff] whitespace-nowrap shrink-0">
+        <Loader2 className="w-2.5 h-2.5 animate-spin" />
+        进行中
+      </span>
+    );
+  }
+  if (status === 'completed') {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/12 px-2 py-0.5 text-[10px] font-medium text-emerald-700 whitespace-nowrap shrink-0">
+        <CheckCircle2 className="w-2.5 h-2.5" />
+        已完成
+      </span>
+    );
+  }
+  if (status === 'awaiting_confirmation') {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/14 px-2 py-0.5 text-[10px] font-medium text-amber-800 whitespace-nowrap shrink-0">
+        <Clock className="w-2.5 h-2.5" />
+        待确认
+      </span>
+    );
+  }
+  if (status === 'failed') {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-[#c9444a]/12 px-2 py-0.5 text-[10px] font-medium text-[#b72027] whitespace-nowrap shrink-0">
+        <AlertCircle className="w-2.5 h-2.5" />
+        失败
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1 rounded-full bg-black/[0.05] px-2 py-0.5 text-[10px] font-medium text-[#0c0c0c]/55 whitespace-nowrap shrink-0">
+      <Clock className="w-2.5 h-2.5" />
+      待开始
+    </span>
+  );
+}
+
+function CollaborationPlanCard({
+  plan,
+  busy,
+  onRunSuggestion,
+}: {
+  plan: CollaborationCardBlock;
+  busy?: boolean;
+  onRunSuggestion?: (
+    instruction: string,
+    targetRole?: 'alex' | 'emma' | 'iris'
+  ) => void;
+}) {
+  const doneCount = plan.steps.filter((s) => s.status === 'completed').length;
+  const hasAwaiting = plan.steps.some(
+    (s) => s.status === 'awaiting_confirmation'
+  );
+  const allCompleted =
+    plan.steps.length > 0 && doneCount === plan.steps.length;
+
+  const groupCounts = new Map<number, number>();
+  for (const s of plan.steps) {
+    if (s.parallelGroup !== undefined) {
+      groupCounts.set(s.parallelGroup, (groupCounts.get(s.parallelGroup) ?? 0) + 1);
+    }
+  }
+
+  return (
+    <div
+      data-collaboration-plan={plan.turnId}
+      className="rounded-xl border border-black/[0.08] bg-white p-3 space-y-2.5 shadow-[0_1px_2px_rgba(12,12,12,0.03)]"
+    >
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1.5 min-w-0">
+          <Users className="w-3.5 h-3.5 text-[#4267ff] shrink-0" />
+          <span className="text-xs font-semibold text-[#0c0c0c]/90 truncate">
+            团队协作分工
+          </span>
+        </div>
+        <span
+          className={`rounded-full px-2 py-0.5 text-[10px] font-medium whitespace-nowrap shrink-0 ${
+            allCompleted
+              ? 'bg-emerald-500/12 text-emerald-700'
+              : hasAwaiting
+                ? 'bg-amber-500/14 text-amber-800'
+                : 'bg-[#4267ff]/10 text-[#4267ff]'
+          }`}
+        >
+          {allCompleted
+            ? '协作完成'
+            : hasAwaiting
+              ? '待确认实施'
+              : `${doneCount}/${plan.steps.length} 已完成`}
+        </span>
+      </div>
+
+      {plan.rationale && (
+        <p className="text-[11px] text-[#0c0c0c]/55 leading-relaxed">
+          {plan.rationale}
+        </p>
+      )}
+
+      <div className="space-y-1.5">
+        {plan.steps.map((step) => {
+          const meta = COLLAB_ROLE_META[step.role];
+          const isParallel =
+            step.parallelGroup !== undefined &&
+            (groupCounts.get(step.parallelGroup) ?? 0) >= 2;
+          const isRelay = !isParallel && step.dependsOn.length > 0;
+
+          return (
+            <div
+              key={step.stepId}
+              data-collab-step={step.role}
+              data-collab-status={step.status}
+              className="rounded-lg border border-black/[0.06] bg-[#fcfcfb] px-2.5 py-2 space-y-1.5"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <span
+                    aria-hidden="true"
+                    className="w-2 h-2 rounded-full shrink-0"
+                    style={{ backgroundColor: meta.dotColor }}
+                  />
+                  <span className="text-[11px] font-semibold text-[#0c0c0c]/88 whitespace-nowrap">
+                    {meta.label}
+                  </span>
+                  {isParallel && (
+                    <span className="rounded bg-[#4267ff]/10 px-1.5 py-0.5 text-[9px] font-medium text-[#4267ff] whitespace-nowrap">
+                      并行
+                    </span>
+                  )}
+                  {isRelay && (
+                    <span className="rounded bg-black/[0.05] px-1.5 py-0.5 text-[9px] font-medium text-[#0c0c0c]/60 whitespace-nowrap">
+                      接力
+                    </span>
+                  )}
+                </div>
+                <CollaborationStepStatusBadge status={step.status} />
+              </div>
+
+              <p className="text-[11px] text-[#0c0c0c]/75 leading-snug">
+                {step.subTask}
+              </p>
+
+              {step.status === 'awaiting_confirmation' &&
+                step.handoffInstruction &&
+                onRunSuggestion && (
+                  <div className="pt-0.5 flex justify-end">
+                    <button
+                      type="button"
+                      data-collab-confirm={step.role}
+                      disabled={busy}
+                      onClick={() =>
+                        onRunSuggestion(step.handoffInstruction!, 'alex')
+                      }
+                      className="rounded-full bg-[#4267ff] px-2.5 py-1 text-[10px] font-semibold text-white hover:bg-[#425ce1] disabled:opacity-45 disabled:cursor-not-allowed transition cursor-pointer"
+                    >
+                      确认交由 Alex 实施 →
+                    </button>
+                  </div>
+                )}
+
+              {step.status === 'failed' && (
+                <div className="pt-0.5 space-y-1">
+                  {step.error && (
+                    <p className="text-[10px] text-[#b72027] leading-snug">
+                      {step.error}
+                    </p>
+                  )}
+                  {step.handoffInstruction && onRunSuggestion && (
+                    <div className="flex justify-end">
+                      <button
+                        type="button"
+                        data-collab-retry={step.role}
+                        disabled={busy}
+                        onClick={() =>
+                          onRunSuggestion(step.handoffInstruction!, 'alex')
+                        }
+                        className="inline-flex items-center gap-1 rounded-full border border-[#c9444a]/30 bg-white px-2.5 py-0.5 text-[10px] font-medium text-[#b72027] hover:bg-[#c9444a]/[0.06] disabled:opacity-45 disabled:cursor-not-allowed transition cursor-pointer"
+                      >
+                        <RotateCcw className="w-2.5 h-2.5" />
+                        重试 Alex 实施
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export function TimelineStream({
   events,
+  isLoading,
+  loadingTitle,
   onOpenPreview,
   onOpenCode,
   onRunSuggestion,
   busy,
 }: {
   events: AgentEvent[];
+  isLoading?: boolean;
+  loadingTitle?: string;
   onOpenPreview: () => void;
   onOpenCode: () => void;
   onRunSuggestion?: (
@@ -692,6 +996,35 @@ export function TimelineStream({
   })();
 
   if (items.length === 0) {
+    if (isLoading) {
+      return (
+        <div
+          data-testid="project-loading-timeline"
+          className="space-y-3"
+        >
+          <div className="rounded-2xl border border-black/[0.08] bg-white p-3.5 flex items-center gap-2.5 shadow-[0_1px_2px_rgba(12,12,12,0.03)]">
+            <Loader2 className="w-4 h-4 text-[#4267ff] animate-spin shrink-0" />
+            <div className="min-w-0">
+              <div className="text-xs font-medium text-[#0c0c0c]/85 truncate">
+                正在加载「{loadingTitle || '项目'}」历史记录...
+              </div>
+              <div className="text-[11px] text-[#0c0c0c]/50">
+                正在恢复 AI 团队对话与构建进度
+              </div>
+            </div>
+          </div>
+          <div className="flex justify-end">
+            <div className="h-9 w-44 rounded-2xl rounded-tr-sm bg-[#ebebea]/80 animate-pulse" />
+          </div>
+          <div className="rounded-2xl border border-black/[0.06] bg-white p-3.5 space-y-2 animate-pulse">
+            <div className="h-3.5 w-32 rounded bg-black/[0.06]" />
+            <div className="h-3 w-full rounded bg-black/[0.05]" />
+            <div className="h-3 w-4/5 rounded bg-black/[0.05]" />
+          </div>
+        </div>
+      );
+    }
+
     return (
       <div className="rounded-2xl border border-dashed border-black/[0.12] bg-white/70 p-4 text-center space-y-1.5">
         <Sparkles className="w-5 h-5 text-[#4267ff] mx-auto" />
@@ -724,6 +1057,17 @@ export function TimelineStream({
                 <RichMentionText text={item.text} mentions={item.mentions} />
               </div>
             </div>
+          );
+        }
+
+        if (item.kind === 'collaboration_plan') {
+          return (
+            <CollaborationPlanCard
+              key={item.key}
+              plan={item}
+              busy={busy}
+              onRunSuggestion={onRunSuggestion}
+            />
           );
         }
 
