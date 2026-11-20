@@ -772,6 +772,11 @@ export function Workbench() {
       return;
     }
     const targetId = activeId;
+    const expectedRunId =
+      snapshot?.project.id === targetId
+        ? snapshot.project.raceBranches.find((b) => b.branchId === branchId)
+            ?.runId
+        : undefined;
     const isCurrentProject = () =>
       !activeIdRef.current || activeIdRef.current === targetId;
     setErrorMsg('');
@@ -781,7 +786,7 @@ export function Workbench() {
       const res = await fetch(`/api/projects/${targetId}/select-branch`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ branchId }),
+        body: JSON.stringify({ branchId, runId: expectedRunId }),
       });
       if (!res.ok) {
         const j = (await res.json()) as { error?: string };
@@ -1710,19 +1715,35 @@ export function Workbench() {
                               const nextId = e.target.value as DesignScenarioId;
                               const nextDef = DESIGN_SCENARIOS[nextId];
                               const prevDs = editablePlan.designSystem!;
+                              const matchedTheme = prevDs.themeId
+                                ? allThemes.find((t) => t.id === prevDs.themeId)
+                                : undefined;
+                              const nextCustomStylePrompt =
+                                prevDs.themeId &&
+                                (!matchedTheme ||
+                                  prevDs.customStylePrompt ===
+                                    matchedTheme.stylePrompt)
+                                  ? undefined
+                                  : prevDs.customStylePrompt;
                               setEditablePlan({
                                 ...editablePlan,
                                 designSystem: {
                                   ...prevDs,
                                   scenario: nextId,
                                   scenarioName: nextDef.name,
+                                  tone: nextDef.toneKeywords,
                                   colorMode: nextDef.defaultColorMode,
                                   palette: { ...nextDef.defaultPalette },
                                   typography: { ...nextDef.defaultTypography },
+                                  radiusStyle: nextDef.defaultRadiusStyle,
+                                  surfaceDepth: nextDef.defaultSurfaceDepth,
                                   layoutBlueprint: nextDef.layoutRules,
+                                  motionStyle: nextDef.motionRules,
+                                  mediaStrategy: nextDef.mediaRule,
                                   antiPatterns: nextDef.antiPatterns,
                                   themeId: undefined,
                                   themeName: undefined,
+                                  customStylePrompt: nextCustomStylePrompt,
                                 },
                               });
                             }}

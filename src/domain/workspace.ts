@@ -106,6 +106,7 @@ export interface ProductPlan {
  */
 export interface RaceBranch {
   branchId: string;
+  runId?: string;
   label: string;
   styleDirection: string;
   designSystem?: DesignSystemSpec;

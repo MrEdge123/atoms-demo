@@ -122,36 +122,71 @@ function inferDomainTemplate(ideaText: string): {
   };
 }
 
-function pickReadableButtonTextClass(
+function parseHexRgba(
   hex: string
-): 'text-white' | 'text-[#0F1115]' {
+): { r: number; g: number; b: number; a: number } | null {
   const cleaned = hex.trim().replace(/^#/, '');
-  const normalized =
-    cleaned.length === 3
-      ? cleaned
-          .split('')
-          .map((ch) => `${ch}${ch}`)
-          .join('')
-      : cleaned.length === 6 || cleaned.length === 8
-        ? cleaned.slice(0, 6)
-        : null;
-  if (!normalized || !/^[0-9a-fA-F]{6}$/.test(normalized)) {
-    return 'text-white';
+  if (!/^[0-9a-fA-F]+$/.test(cleaned)) return null;
+  if (cleaned.length === 3 || cleaned.length === 4) {
+    const r = Number.parseInt(`${cleaned[0]}${cleaned[0]}`, 16) / 255;
+    const g = Number.parseInt(`${cleaned[1]}${cleaned[1]}`, 16) / 255;
+    const b = Number.parseInt(`${cleaned[2]}${cleaned[2]}`, 16) / 255;
+    const a =
+      cleaned.length === 4
+        ? Number.parseInt(`${cleaned[3]}${cleaned[3]}`, 16) / 255
+        : 1;
+    return { r, g, b, a };
   }
+  if (cleaned.length === 6 || cleaned.length === 8) {
+    const r = Number.parseInt(cleaned.slice(0, 2), 16) / 255;
+    const g = Number.parseInt(cleaned.slice(2, 4), 16) / 255;
+    const b = Number.parseInt(cleaned.slice(4, 6), 16) / 255;
+    const a =
+      cleaned.length === 8
+        ? Number.parseInt(cleaned.slice(6, 8), 16) / 255
+        : 1;
+    return { r, g, b, a };
+  }
+  return null;
+}
+
+function relativeLuminance(r: number, g: number, b: number): number {
   const linearize = (c: number) =>
     c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
-  const r = Number.parseInt(normalized.slice(0, 2), 16) / 255;
-  const g = Number.parseInt(normalized.slice(2, 4), 16) / 255;
-  const b = Number.parseInt(normalized.slice(4, 6), 16) / 255;
-  const lum =
-    0.2126 * linearize(r) + 0.7152 * linearize(g) + 0.0722 * linearize(b);
+  return 0.2126 * linearize(r) + 0.7152 * linearize(g) + 0.0722 * linearize(b);
+}
+
+function pickReadableButtonTextClass(
+  accentHex: string,
+  surfaceHex: string
+): 'text-white' | 'text-[#0F1115]' | 'text-black' {
+  const accent = parseHexRgba(accentHex);
+  if (!accent) return 'text-white';
+  const rawSurface = parseHexRgba(surfaceHex) ?? { r: 1, g: 1, b: 1, a: 1 };
+  // Composite translucent surface over white backdrop first, then composite accent over surface
+  const sr = rawSurface.r * rawSurface.a + (1 - rawSurface.a);
+  const sg = rawSurface.g * rawSurface.a + (1 - rawSurface.a);
+  const sb = rawSurface.b * rawSurface.a + (1 - rawSurface.a);
+  const r = accent.r * accent.a + sr * (1 - accent.a);
+  const g = accent.g * accent.a + sg * (1 - accent.a);
+  const b = accent.b * accent.a + sb * (1 - accent.a);
+
+  const lum = relativeLuminance(r, g, b);
   const whiteContrast = 1.05 / (lum + 0.05);
-  const darkLum =
-    0.2126 * linearize(0x0f / 255) +
-    0.7152 * linearize(0x11 / 255) +
-    0.0722 * linearize(0x15 / 255);
-  const darkContrast = (lum + 0.05) / (darkLum + 0.05);
-  return whiteContrast >= darkContrast ? 'text-white' : 'text-[#0F1115]';
+  const inkLum = relativeLuminance(0x0f / 255, 0x11 / 255, 0x15 / 255);
+  const inkContrast = (lum + 0.05) / (inkLum + 0.05);
+  const blackContrast = (lum + 0.05) / 0.05;
+
+  if (whiteContrast >= 4.5 && whiteContrast >= inkContrast) {
+    return 'text-white';
+  }
+  if (inkContrast >= 4.5) {
+    return 'text-[#0F1115]';
+  }
+  if (blackContrast >= 4.5) {
+    return 'text-black';
+  }
+  return whiteContrast >= blackContrast ? 'text-white' : 'text-black';
 }
 
 function buildMockReactFiles(opts: {
@@ -196,10 +231,12 @@ function buildMockReactFiles(opts: {
   const inputClass = opts.darkTheme
     ? 'w-full rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-2.5 text-sm text-slate-100 placeholder-slate-500 focus:border-cyan-400 focus:outline-none'
     : 'w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900 placeholder-slate-400 focus:border-indigo-500 focus:bg-white focus:outline-none';
+  const effectiveSurfaceHex =
+    customSurface ?? customBg ?? (opts.darkTheme ? '#0F172A' : '#FFFFFF');
   const primaryBtn = opts.deepBlueAccent
     ? 'inline-flex items-center justify-center gap-1.5 rounded-xl bg-blue-800 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-900 transition disabled:opacity-50'
     : customAccent
-      ? `inline-flex items-center justify-center gap-1.5 rounded-full bg-[${customAccent}] px-4 py-2.5 text-sm font-semibold ${pickReadableButtonTextClass(customAccent)} hover:opacity-90 transition disabled:opacity-50`
+      ? `inline-flex items-center justify-center gap-1.5 rounded-full bg-[${customAccent}] px-4 py-2.5 text-sm font-semibold ${pickReadableButtonTextClass(customAccent, effectiveSurfaceHex)} hover:shadow-md hover:ring-2 hover:ring-offset-1 hover:ring-current/25 transition disabled:opacity-50`
       : opts.darkTheme
         ? 'inline-flex items-center justify-center gap-1.5 rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-emerald-400 transition disabled:opacity-50'
         : 'inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-indigo-700 transition disabled:opacity-50';

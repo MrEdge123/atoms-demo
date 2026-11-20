@@ -197,6 +197,7 @@ export class PostgresProjectRepository implements ProjectRepository {
     id: string,
     input: {
       branchId: string;
+      expectedRunId?: string;
       files: VirtualFS;
       designSystem?: DesignSystemSpec;
     }
@@ -220,6 +221,7 @@ export class PostgresProjectRepository implements ProjectRepository {
            SELECT 1
            FROM jsonb_array_elements(race_branches_json) AS elem
            WHERE elem->>'branchId' = $5
+             AND ($6::text IS NULL OR elem->>'runId' = $6)
          )
        RETURNING *`,
       [
@@ -228,6 +230,7 @@ export class PostgresProjectRepository implements ProjectRepository {
         input.designSystem ? JSON.stringify(input.designSystem) : null,
         now,
         input.branchId,
+        input.expectedRunId ?? null,
       ]
     );
     return res.rows[0] ? mapProjectRow(res.rows[0]) : null;

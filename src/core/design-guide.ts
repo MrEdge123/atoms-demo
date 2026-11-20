@@ -591,6 +591,58 @@ export function resolveBranchDesignSystem(
       ? `${dir.colorMode === 'dark' ? '深色明度阶梯分层' : '浅色留白构图分层'}（主画布 ${dir.palette.background} → 卡片容器 ${dir.palette.surface}），${dir.surfaceDepth === 'stepped-dark' ? '使用 1px rgba(255,255,255,0.08) 半透明描边替代黑阴影' : '以 1px 柔和描边或极轻阴影建立清晰秩序'}，保持 40–60% 呼吸留白与单一视觉焦点。`
       : def.layoutRules;
 
+  const rawCustomLayout = baseDs?.layoutBlueprint?.trim();
+  const hasCustomLayout = Boolean(
+    rawCustomLayout && rawCustomLayout !== def.layoutRules.trim()
+  );
+  let resolvedLayoutBlueprint = contrastLayoutBlueprint;
+  if (hasCustomLayout && rawCustomLayout) {
+    let sanitizedLayout = rawCustomLayout;
+    if (baseDs && dir.colorMode !== baseDs.colorMode) {
+      const replaceCaseInsensitive = (
+        input: string,
+        needle: string,
+        replacement: string
+      ) =>
+        needle
+          ? input.replace(
+              new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'),
+              replacement
+            )
+          : input;
+      sanitizedLayout = replaceCaseInsensitive(
+        sanitizedLayout,
+        baseDs.palette.background,
+        dir.palette.background
+      );
+      sanitizedLayout = replaceCaseInsensitive(
+        sanitizedLayout,
+        baseDs.palette.surface,
+        dir.palette.surface
+      );
+      sanitizedLayout = replaceCaseInsensitive(
+        sanitizedLayout,
+        '#0A0B10',
+        dir.palette.background
+      );
+    }
+    resolvedLayoutBlueprint =
+      dir.colorMode !== def.defaultColorMode
+        ? `${contrastLayoutBlueprint} 同时延续已确认布局约束：${sanitizedLayout}`
+        : sanitizedLayout;
+  }
+
+  const opposingBg =
+    baseDs && dir.colorMode !== baseDs.colorMode
+      ? baseDs.palette.background.toLowerCase()
+      : null;
+  const keptBaseAntiPatterns = (baseDs?.antiPatterns ?? []).filter(
+    (item) => !opposingBg || !item.toLowerCase().includes(opposingBg)
+  );
+  const mergedAntiPatterns = Array.from(
+    new Set([...keptBaseAntiPatterns, ...def.antiPatterns])
+  );
+
   return {
     scenario: def.id,
     scenarioName: baseDs?.scenarioName || def.name,
@@ -602,12 +654,12 @@ export function resolveBranchDesignSystem(
       : { ...def.defaultTypography },
     radiusStyle: dir.radiusStyle ?? baseDs?.radiusStyle ?? def.defaultRadiusStyle,
     surfaceDepth: dir.surfaceDepth,
-    layoutBlueprint: contrastLayoutBlueprint,
+    layoutBlueprint: resolvedLayoutBlueprint,
     visualFocalPoint:
       baseDs?.visualFocalPoint || '首屏单一核心视觉焦点与 40–60% 呼吸留白构图',
     motionStyle: baseDs?.motionStyle || def.motionRules,
     mediaStrategy: baseDs?.mediaStrategy || def.mediaRule,
-    antiPatterns: [...def.antiPatterns],
+    antiPatterns: mergedAntiPatterns,
   };
 }
 

@@ -256,34 +256,69 @@ function parseHueDegrees(token: string): number | null {
   return ((deg % 360) + 360) % 360;
 }
 
-function splitCssColorArgs(inner: string): string[] | null {
+function parseAlphaChannel(token: string): number | null {
+  const trimmed = token.trim();
+  if (/^[+-]?(?:\d+\.?\d*|\.\d+)%$/.test(trimmed)) {
+    const pct = Number.parseFloat(trimmed.slice(0, -1));
+    if (!Number.isFinite(pct) || pct < 0 || pct > 100) return null;
+    return pct / 100;
+  }
+  if (/^[+-]?(?:\d+\.?\d*|\.\d+)$/.test(trimmed)) {
+    const num = Number.parseFloat(trimmed);
+    if (!Number.isFinite(num) || num < 0 || num > 1) return null;
+    return num;
+  }
+  return null;
+}
+
+function splitCssColorArgs(
+  inner: string
+): { channels: [string, string, string]; alpha: string | null } | null {
   if (inner.includes(',')) {
     const parts = inner.split(',').map((p) => p.trim());
-    return parts.length === 3 || parts.length === 4 ? parts.slice(0, 3) : null;
+    if (parts.length === 3) {
+      return { channels: [parts[0], parts[1], parts[2]], alpha: null };
+    }
+    if (parts.length === 4 && parts[3]) {
+      return { channels: [parts[0], parts[1], parts[2]], alpha: parts[3] };
+    }
+    return null;
   }
   const slashParts = inner.split('/').map((p) => p.trim());
   if (slashParts.length > 2) return null;
+  if (slashParts.length === 2 && !slashParts[1]) return null;
   const channels = slashParts[0].split(/\s+/).filter(Boolean);
-  return channels.length === 3 ? channels : null;
+  if (channels.length !== 3) return null;
+  return {
+    channels: [channels[0], channels[1], channels[2]],
+    alpha: slashParts.length === 2 ? slashParts[1] : null,
+  };
 }
 
 /**
- * Normalizes legacy `#RGB`, `#RRGGBB`, `rgb(...)`, `rgba(...)`, `hsl(...)`, `hsla(...)`,
- * or named CSS colors into uppercase `#RRGGBB` hex, or returns `null` when unsupported.
+ * Normalizes legacy `#RGB`, `#RGBA`, `#RRGGBB`, `#RRGGBBAA`, `rgb(...)`, `rgba(...)`,
+ * `hsl(...)`, `hsla(...)`, or named CSS colors into uppercase `#RRGGBB` / `#RRGGBBAA` hex,
+ * preserving opacity when < 1, or returns `null` when unsupported.
  */
 export function normalizeCssColorToHex(raw: string): string | null {
   const trimmed = raw.trim();
   if (!trimmed) return null;
 
-  const shortHex = trimmed.match(/^#([0-9a-fA-F]{3})$/);
+  const shortHex = trimmed.match(/^#([0-9a-fA-F]{3,4})$/);
   if (shortHex) {
-    const [r, g, b] = shortHex[1].toUpperCase().split('');
-    return `#${r}${r}${g}${g}${b}${b}`;
+    const chars = shortHex[1].toUpperCase().split('');
+    const rgbHex = `#${chars[0]}${chars[0]}${chars[1]}${chars[1]}${chars[2]}${chars[2]}`;
+    if (chars.length === 3 || chars[3] === 'F') return rgbHex;
+    return `${rgbHex}${chars[3]}${chars[3]}`;
   }
 
-  const fullHex = trimmed.match(/^#([0-9a-fA-F]{6})$/);
+  const fullHex = trimmed.match(/^#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/);
   if (fullHex) {
-    return `#${fullHex[1].toUpperCase()}`;
+    const upper = fullHex[1].toUpperCase();
+    if (upper.length === 8 && upper.endsWith('FF')) {
+      return `#${upper.slice(0, 6)}`;
+    }
+    return `#${upper}`;
   }
 
   const named = NAMED_CSS_HEX[trimmed.toLowerCase()];
@@ -291,23 +326,27 @@ export function normalizeCssColorToHex(raw: string): string | null {
 
   const rgbMatch = trimmed.match(/^rgba?\(\s*([^)]+?)\s*\)$/i);
   if (rgbMatch) {
-    const parts = splitCssColorArgs(rgbMatch[1]);
-    if (!parts) return null;
-    const r = parseRgbChannel(parts[0]);
-    const g = parseRgbChannel(parts[1]);
-    const b = parseRgbChannel(parts[2]);
-    if (r === null || g === null || b === null) return null;
-    return `#${clampByteToHex(r)}${clampByteToHex(g)}${clampByteToHex(b)}`;
+    const args = splitCssColorArgs(rgbMatch[1]);
+    if (!args) return null;
+    const r = parseRgbChannel(args.channels[0]);
+    const g = parseRgbChannel(args.channels[1]);
+    const b = parseRgbChannel(args.channels[2]);
+    const alpha = args.alpha !== null ? parseAlphaChannel(args.alpha) : 1;
+    if (r === null || g === null || b === null || alpha === null) return null;
+    const alphaByte = Math.round(alpha * 255);
+    const alphaHex = alphaByte === 255 ? '' : clampByteToHex(alphaByte);
+    return `#${clampByteToHex(r)}${clampByteToHex(g)}${clampByteToHex(b)}${alphaHex}`;
   }
 
   const hslMatch = trimmed.match(/^hsla?\(\s*([^)]+?)\s*\)$/i);
   if (hslMatch) {
-    const parts = splitCssColorArgs(hslMatch[1]);
-    if (!parts) return null;
-    const h = parseHueDegrees(parts[0]);
-    const s = parseCssPercentage(parts[1]);
-    const l = parseCssPercentage(parts[2]);
-    if (h === null || s === null || l === null) return null;
+    const args = splitCssColorArgs(hslMatch[1]);
+    if (!args) return null;
+    const h = parseHueDegrees(args.channels[0]);
+    const s = parseCssPercentage(args.channels[1]);
+    const l = parseCssPercentage(args.channels[2]);
+    const alpha = args.alpha !== null ? parseAlphaChannel(args.alpha) : 1;
+    if (h === null || s === null || l === null || alpha === null) return null;
     const c = (1 - Math.abs(2 * l - 1)) * s;
     const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
     const m = l - c / 2;
@@ -333,7 +372,9 @@ export function normalizeCssColorToHex(raw: string): string | null {
       rp = c;
       bp = x;
     }
-    return `#${clampByteToHex((rp + m) * 255)}${clampByteToHex((gp + m) * 255)}${clampByteToHex((bp + m) * 255)}`;
+    const alphaByte = Math.round(alpha * 255);
+    const alphaHex = alphaByte === 255 ? '' : clampByteToHex(alphaByte);
+    return `#${clampByteToHex((rp + m) * 255)}${clampByteToHex((gp + m) * 255)}${clampByteToHex((bp + m) * 255)}${alphaHex}`;
   }
 
   return null;
@@ -385,10 +426,12 @@ export function isSameThemeContent(
 ): boolean {
   const normColor = (val: string) =>
     normalizeCssColorToHex(val) ?? val.trim().toLowerCase();
-  const depthA =
-    a.surfaceDepth ?? (a.colorMode === 'dark' ? 'stepped-dark' : 'hairline');
-  const depthB =
-    b.surfaceDepth ?? (b.colorMode === 'dark' ? 'stepped-dark' : 'hairline');
+  const defA = a.scenario ? DESIGN_SCENARIOS[a.scenario] : null;
+  const defB = b.scenario ? DESIGN_SCENARIOS[b.scenario] : null;
+  const radiusA = a.radiusStyle ?? defA?.defaultRadiusStyle ?? null;
+  const radiusB = b.radiusStyle ?? defB?.defaultRadiusStyle ?? null;
+  const depthA = a.surfaceDepth ?? defA?.defaultSurfaceDepth ?? null;
+  const depthB = b.surfaceDepth ?? defB?.defaultSurfaceDepth ?? null;
 
   return (
     a.name.trim() === b.name.trim() &&
@@ -402,7 +445,7 @@ export function isSameThemeContent(
     normColor(a.palette.accent) === normColor(b.palette.accent) &&
     a.typography.headingStyle === b.typography.headingStyle &&
     a.typography.bodyStyle === b.typography.bodyStyle &&
-    (a.radiusStyle ?? 'soft') === (b.radiusStyle ?? 'soft') &&
+    radiusA === radiusB &&
     depthA === depthB &&
     a.stylePrompt.trim() === b.stylePrompt.trim()
   );

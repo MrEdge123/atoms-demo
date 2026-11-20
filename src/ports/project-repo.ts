@@ -35,6 +35,7 @@ export interface ProjectRepository {
     id: string,
     input: {
       branchId: string;
+      expectedRunId?: string;
       files: VirtualFS;
       designSystem?: DesignSystemSpec;
     }

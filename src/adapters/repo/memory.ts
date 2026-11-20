@@ -103,6 +103,7 @@ export class MemoryProjectRepository implements ProjectRepository {
     id: string,
     input: {
       branchId: string;
+      expectedRunId?: string;
       files: VirtualFS;
       designSystem?: DesignSystemSpec;
     }
@@ -117,7 +118,9 @@ export class MemoryProjectRepository implements ProjectRepository {
       return null;
     }
     const exists = project.raceBranches.some(
-      (b) => b.branchId === input.branchId
+      (b) =>
+        b.branchId === input.branchId &&
+        (!input.expectedRunId || b.runId === input.expectedRunId)
     );
     if (!exists) return null;
 

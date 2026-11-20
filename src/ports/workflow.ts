@@ -26,7 +26,11 @@ export interface WorkflowEngine {
     }
   ): AsyncIterable<AgentEvent>;
 
-  selectBranch(projectId: string, branchId: string): Promise<Project>;
+  selectBranch(
+    projectId: string,
+    branchId: string,
+    opts?: { runId?: string }
+  ): Promise<Project>;
 
   iterate(
     projectId: string,

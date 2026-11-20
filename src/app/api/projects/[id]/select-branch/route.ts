@@ -10,7 +10,10 @@ export async function POST(
   context: { params: Promise<{ id: string }> }
 ) {
   const { id } = await context.params;
-  const body = (await req.json().catch(() => ({}))) as { branchId?: string };
+  const body = (await req.json().catch(() => ({}))) as {
+    branchId?: string;
+    runId?: string;
+  };
   if (!body.branchId) {
     return NextResponse.json(
       { error: 'branchId is required' },
@@ -36,7 +39,13 @@ export async function POST(
         { status: 409 }
       );
     }
-    const project = await c.workflow.selectBranch(id, body.branchId);
+    const expectedRunId =
+      typeof body.runId === 'string' && body.runId.trim()
+        ? body.runId.trim()
+        : undefined;
+    const project = await c.workflow.selectBranch(id, body.branchId, {
+      runId: expectedRunId,
+    });
     const snapshot = await compilePreviewSnapshot(c, project);
     return NextResponse.json({
       project,

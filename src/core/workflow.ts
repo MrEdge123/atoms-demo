@@ -321,6 +321,7 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
           },
         });
 
+        const raceRunId = globalThis.crypto.randomUUID();
         const raceDirections = getRaceDirectionsForPlan(mergedPlan);
         const branchRuns = await Promise.all(
           raceDirections.map(async (dir) => {
@@ -373,6 +374,7 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
 
               const branch: RaceBranch = {
                 branchId: dir.branchId,
+                runId: raceRunId,
                 label: dir.label,
                 styleDirection: dir.styleDirection,
                 designSystem: branchDesignSystem,
@@ -399,6 +401,7 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
               });
               const branch: RaceBranch = {
                 branchId: dir.branchId,
+                runId: raceRunId,
                 label: dir.label,
                 styleDirection: dir.styleDirection,
                 designSystem: branchDesignSystem,
@@ -521,7 +524,11 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
     }
   }
 
-  async selectBranch(projectId: string, branchId: string): Promise<Project> {
+  async selectBranch(
+    projectId: string,
+    branchId: string,
+    opts?: { runId?: string }
+  ): Promise<Project> {
     const project = await this.requireProject(projectId);
     if (isPendingPlanConfirmation(project)) {
       throw new Error('当前存在待确认的 Emma 产品方案，请先确认方案后再选择候选分支');
@@ -533,6 +540,9 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
     if (!chosen) {
       throw new Error(`Race branch "${branchId}" not found on project "${projectId}"`);
     }
+    if (opts?.runId && chosen.runId && chosen.runId !== opts.runId) {
+      throw new Error(`Race branch "${branchId}" belongs to a stale Race run`);
+    }
     if (!chosen.previewHtml || chosen.errors.length > 0) {
       throw new Error(
         `Race branch "${branchId}" failed compilation and cannot be promoted to draft`
@@ -541,6 +551,7 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
 
     const updated = await this.repo.adoptRaceBranch(projectId, {
       branchId: chosen.branchId,
+      expectedRunId: opts?.runId ?? chosen.runId,
       files: chosen.files,
       designSystem: chosen.designSystem,
     });

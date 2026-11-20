@@ -1128,4 +1128,187 @@ export default function App() {
       await c.close();
     }
   }, 20000);
+
+  it('binds Race adoption to runId, handles RGBA opacity & scenario dedup, ensures WCAG button contrast, and retains mode-independent Race constraints', async () => {
+    const {
+      BUILTIN_STYLE_THEMES,
+      createUnthemedDesignSystem,
+      getRaceDirectionsForPlan,
+      isSameThemeContent,
+      normalizeCssColorToHex,
+      renderDesignMarkdown,
+      resolveBranchDesignSystem,
+    } = await import('@/core');
+
+    const c = await createContainer({
+      storageAdapter: 'memory',
+      llmAdapter: 'mock',
+      builderAdapter: 'esbuild',
+    });
+
+    try {
+      // (a) Stale Race runId rejection
+      const projStale = await c.repo.create({
+        title: 'Race Run Guard',
+        slug: 'race-run-guard',
+      });
+      await collect(
+        c.workflow.start(projStale.id, 'Build a workspace supporting race runs')
+      );
+      await collect(c.workflow.confirmPlan(projStale.id, { mode: 'race' }));
+      const run1Snap = await c.repo.getById(projStale.id);
+      const run1Id = run1Snap?.raceBranches[0]?.runId;
+      expect(run1Id).toBeTruthy();
+
+      await collect(c.workflow.confirmPlan(projStale.id, { mode: 'race' }));
+      const run2Snap = await c.repo.getById(projStale.id);
+      const run2Id = run2Snap?.raceBranches[0]?.runId;
+      expect(run2Id).toBeTruthy();
+      expect(run2Id).not.toBe(run1Id);
+
+      await expect(
+        c.workflow.selectBranch(projStale.id, 'branch-a', { runId: run1Id })
+      ).rejects.toThrow(/stale Race run/);
+      const staleAtomic = await c.repo.adoptRaceBranch(projStale.id, {
+        branchId: 'branch-a',
+        expectedRunId: run1Id,
+        files: { 'src/App.tsx': 'stale' },
+      });
+      expect(staleAtomic).toBeNull();
+      expect((await c.repo.getById(projStale.id))?.raceBranches).toHaveLength(2);
+
+      const validSelected = await c.workflow.selectBranch(
+        projStale.id,
+        'branch-b',
+        { runId: run2Id }
+      );
+      expect(validSelected.status).toBe('ready');
+
+      // (b) Contrast with #777777 (pure black >= 4.5:1), #2062E8 (non-fading hover), and #00000020 alpha compositing
+      const makeContrastTheme = (accent: string, surface = '#FFFFFF') => ({
+        id: `contrast-${accent}`,
+        name: `Contrast ${accent}`,
+        description: 'Contrast check theme',
+        scenario: 'B' as const,
+        colorMode: 'light' as const,
+        palette: {
+          background: '#FAF8F4',
+          surface,
+          textPrimary: '#1D1916',
+          textMuted: '#6E665E',
+          accent,
+        },
+        typography: {
+          headingStyle: 'editorial-serif' as const,
+          bodyStyle: 'sans' as const,
+        },
+        stylePrompt: 'Contrast test directive',
+        isCustom: true,
+      });
+
+      const pMidGray = await c.repo.create({
+        title: 'Gray Accent CTA',
+        slug: 'gray-accent-cta',
+      });
+      await collect(
+        c.workflow.start(pMidGray.id, 'Gray button contrast app', {
+          styleTheme: makeContrastTheme('#777777'),
+        })
+      );
+      await collect(c.workflow.confirmPlan(pMidGray.id, { mode: 'linear' }));
+      const grayApp = (await c.repo.getById(pMidGray.id))?.draftFiles['src/App.tsx'] ?? '';
+      expect(grayApp).toContain('bg-[#777777]');
+      expect(grayApp).toContain('text-black');
+
+      const mobileTheme = BUILTIN_STYLE_THEMES.find(
+        (t) => t.id === 'preset-mobile-companion'
+      )!;
+      const pMob = await c.repo.create({
+        title: 'Mobile Contrast App',
+        slug: 'mobile-contrast-app',
+      });
+      await collect(
+        c.workflow.start(pMob.id, 'Mobile daily tracker app', {
+          styleTheme: mobileTheme,
+        })
+      );
+      await collect(c.workflow.confirmPlan(pMob.id, { mode: 'linear' }));
+      const mobApp = (await c.repo.getById(pMob.id))?.draftFiles['src/App.tsx'] ?? '';
+      expect(mobApp).toContain('bg-[#2062E8]');
+      expect(mobApp).toContain('text-white');
+      expect(mobApp).not.toContain('hover:opacity-90');
+
+      const pAlpha = await c.repo.create({
+        title: 'Translucent Accent CTA',
+        slug: 'translucent-accent-cta',
+      });
+      await collect(
+        c.workflow.start(pAlpha.id, 'Translucent button overlay check', {
+          styleTheme: makeContrastTheme('#00000020', '#FFFFFF'),
+        })
+      );
+      await collect(c.workflow.confirmPlan(pAlpha.id, { mode: 'linear' }));
+      const alphaApp = (await c.repo.getById(pAlpha.id))?.draftFiles['src/App.tsx'] ?? '';
+      expect(alphaApp).toContain('bg-[#00000020]');
+      expect(alphaApp).toContain('text-[#0F1115]');
+
+      // (c) RGBA opacity preservation & Scenario F dedup defaults
+      expect(normalizeCssColorToHex('rgba(255, 255, 255, 0.25)')).toBe(
+        '#FFFFFF40'
+      );
+      expect(normalizeCssColorToHex('rgba(255, 255, 255, 2)')).toBeNull();
+      const baseF = makeContrastTheme('#2062E8');
+      const scenarioFOmitted = { ...baseF, scenario: 'F' as const };
+      const scenarioFExplicitSoft = {
+        ...scenarioFOmitted,
+        radiusStyle: 'soft' as const,
+        surfaceDepth: 'hairline' as const,
+      };
+      expect(isSameThemeContent(scenarioFOmitted, scenarioFExplicitSoft)).toBe(
+        false
+      );
+
+      // (d) Mode-independent layoutBlueprint & antiPatterns preserved in alternate Race branch
+      const obsidianTheme = BUILTIN_STYLE_THEMES.find(
+        (t) => t.id === 'preset-obsidian-tech'
+      )!;
+      const customConstrainedPlan = {
+        appName: 'Constrained Race App',
+        summary: 'Plan with explicit layout constraint',
+        targetUsers: 'engineers',
+        capabilities: ['db' as const],
+        collections: [
+          { name: 'items', fields: ['title'], description: 'Records' },
+        ],
+        pages: [{ name: 'Home', purpose: 'Main view' }],
+        designSystem: {
+          ...createUnthemedDesignSystem('G'),
+          colorMode: obsidianTheme.colorMode,
+          palette: obsidianTheme.palette,
+          layoutBlueprint: '左侧固定导航栏 + 右侧主内容区',
+          antiPatterns: ['禁止轮播图', '禁用 #0A0B10 暗色卡片'],
+          themeId: obsidianTheme.id,
+          themeName: obsidianTheme.name,
+          customStylePrompt: obsidianTheme.stylePrompt,
+        },
+      };
+      const dirs = getRaceDirectionsForPlan(customConstrainedPlan);
+      const resolvedAlt = resolveBranchDesignSystem(
+        customConstrainedPlan,
+        dirs[1]!
+      );
+      const altMd = renderDesignMarkdown({
+        ...customConstrainedPlan,
+        designSystem: resolvedAlt,
+      });
+      expect(resolvedAlt.layoutBlueprint).toContain('左侧固定导航栏 + 右侧主内容区');
+      expect(resolvedAlt.antiPatterns).toContain('禁止轮播图');
+      expect(resolvedAlt.antiPatterns).not.toContain('禁用 #0A0B10 暗色卡片');
+      expect(altMd).toContain('左侧固定导航栏 + 右侧主内容区');
+      expect(altMd).toContain('禁止轮播图');
+      expect(altMd).not.toContain('#0A0B10');
+    } finally {
+      await c.close();
+    }
+  }, 20000);
 });

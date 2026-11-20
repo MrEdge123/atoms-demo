@@ -260,8 +260,22 @@ describe('L2: Real PGlite persistence across container restarts and iterative re
       );
       await drain(c1.workflow.confirmPlan(proj.id, { mode: 'race' }));
       await c1.repo.rename(proj.id, 'User Renamed Title');
+      const raceRunId = (await c1.repo.getById(proj.id))?.raceBranches[0]?.runId;
+      expect(raceRunId).toBeTruthy();
 
-      const selected = await c1.workflow.selectBranch(proj.id, 'branch-b');
+      await expect(
+        c1.workflow.selectBranch(proj.id, 'branch-b', { runId: 'stale-run-id' })
+      ).rejects.toThrow(/stale Race run/);
+      const staleAtomic = await c1.repo.adoptRaceBranch(proj.id, {
+        branchId: 'branch-b',
+        expectedRunId: 'stale-run-id',
+        files: { 'src/App.tsx': 'stale' },
+      });
+      expect(staleAtomic).toBeNull();
+
+      const selected = await c1.workflow.selectBranch(proj.id, 'branch-b', {
+        runId: raceRunId,
+      });
       expect(selected.title).toBe('User Renamed Title');
       expect(selected.plan?.designSystem?.colorMode).toBe('light');
       expect(selected.plan?.designSystem?.palette.background).toBe('#F8F9FB');
