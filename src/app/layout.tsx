@@ -4,7 +4,7 @@ import './globals.css';
 export const metadata: Metadata = {
   title: 'Mini Atoms · AI 多智能体商业应用工作台',
   description:
-    '从一句话想法到调研、方案确认、全栈构建、真实数据持久化与一键公网发布的 Route A+ Demo。',
+    '从一句话想法到调研、方案确认、全栈构建、数据持久化与一键公网发布。',
 };
 
 export default function RootLayout({

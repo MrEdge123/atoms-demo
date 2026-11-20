@@ -1,4 +1,4 @@
-# Mini Atoms Demo（路线 A+）
+# Mini Atoms
 
 - **在线工作台**：<https://xcodea.online>
 - **示例站点**：<https://xcodea.online/s/app-otqlo>
@@ -32,7 +32,7 @@
 
 ## 实现思路与关键取舍
 
-本项目采用 **「路线 A+」** 工程路线：AI 专注于前端 React + Tailwind 交互生成，后端数据、鉴权、订阅和 AI 能力统一收敛到托管式 `@atoms/cloud` SDK，并通过内存 `esbuild` 打包成自包含 HTML；相比为每个生成应用动态拉起独立容器和数据库的“重全栈路线”，这套方案在轻量云主机上实现了毫秒级编译反馈、极低运维成本以及改版重发布零丢数据，同时通过 Ports & Adapters（六边形架构）将 LLM、构建器、存储、发布与支付全部抽成可替换接口。详参 [02 - Demo 范围界定与关键技术取舍](./docs/02-demo-scope-and-tradeoffs.md) 与 [03 - 路线 A+ 完整架构设计](./docs/03-architecture-design.md)。
+本项目采用 **「前端交互 + 平台托管 BaaS」** 的轻全栈架构：AI 专注于前端 React + Tailwind 交互与视觉体验，后端数据、鉴权、订阅与 AI 能力统一收敛到内置 SDK，并通过内存 `esbuild` 打包为自包含 HTML；相比为每个生成应用动态拉起独立容器和数据库的“重全栈路线”，这套方案在轻量云主机上实现了毫秒级编译反馈、极低运维成本以及改版重发布零丢数据，同时通过 Ports & Adapters（六边形架构）将 LLM、构建器、存储、发布与支付全部抽成可替换接口。详参 [02 - 范围界定与关键技术取舍](./docs/02-demo-scope-and-tradeoffs.md) 与 [03 - 轻全栈架构设计与三层测试闭环](./docs/03-architecture-design.md)。
 
 ---
 
@@ -140,8 +140,8 @@ npm run start
 
 - **调研、设计与运维文档（`docs/`）**：
   - [01 - Atoms 产品调研与竞品分析](./docs/01-atoms-research.md)
-  - [02 - Demo 范围界定与关键技术取舍](./docs/02-demo-scope-and-tradeoffs.md)
-  - [03 - 路线 A+ 完整架构设计与三层测试闭环](./docs/03-architecture-design.md)
+  - [02 - 范围界定与关键技术取舍](./docs/02-demo-scope-and-tradeoffs.md)
+  - [03 - 轻全栈架构设计与三层测试闭环](./docs/03-architecture-design.md)
   - [04 - WSL2 开发环境连通性与配置说明](./docs/04-wsl2-dev-env.md)
   - [05 - Atoms 实测使用体验报告与视觉排版规范](./docs/05-atoms-ux-visual-audit.md)
   - [06 - 最终成品交付清单与阶段规划](./docs/06-delivery-checklist.md)

@@ -527,7 +527,7 @@ export default function App() {
           <div className="space-y-1.5">
             <div className="inline-flex items-center gap-1.5 rounded-full bg-indigo-500/10 px-3 py-1 text-xs font-medium text-indigo-500">
               <Sparkles className="w-3.5 h-3.5" />
-              Powered by @atoms/cloud
+              在线实时工作台
             </div>
             <h1 className="${headingFontClass}text-2xl sm:text-3xl font-bold tracking-tight">${opts.appName}</h1>
             <p className="text-sm ${mutedText}">${opts.summary}</p>
@@ -799,7 +799,7 @@ export class MockLLMProvider implements LLMProvider {
           '外包或自建全栈后端部署与支付联调成本过高',
         ],
         differentiators: [
-          '自带 @atoms/cloud 持久化与账号体系，刷新/换设备数据不丢',
+          '自带云端数据持久化与账号体系，刷新或换设备数据不丢',
           '内置 Pro 订阅升级收银台与原生 SEO/OG 分享卡片',
           '一键发布独立公网页面，微信/手机 4G 秒开',
         ],

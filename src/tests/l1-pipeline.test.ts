@@ -5,6 +5,7 @@ import {
   BUILTIN_STYLE_THEMES,
   alexFilesOutputSchema,
   buildAlexGeneratePrompt,
+  buildAlexIteratePrompt,
   getRaceDirectionsForPlan,
   renderDesignMarkdown,
 } from '@/core';
@@ -1510,4 +1511,45 @@ export default function App() {
       await c.close();
     }
   }, 20000);
+
+  it('guards prompts and mock generated apps against exposing internal SDK/platform jargon in UI copy', async () => {
+    const samplePlan = {
+      appName: '星辰沙龙',
+      summary: '线下沙龙活动报名与签到站',
+      targetUsers: '活动主办方与参会者',
+      capabilities: ['db', 'auth', 'billing'] as Array<'db' | 'auth' | 'billing' | 'ai'>,
+      pages: [{ name: 'Home', purpose: '活动介绍与报名' }],
+      collections: [
+        {
+          name: 'items',
+          fields: ['title', 'status'],
+          description: '报名记录',
+        },
+      ],
+    };
+
+    const genPrompt = buildAlexGeneratePrompt({ plan: samplePlan });
+    const iterPrompt = buildAlexIteratePrompt({
+      plan: samplePlan,
+      files: { 'src/App.tsx': 'export default function App() { return <div />; }' },
+      instruction: '主色调改成深蓝色',
+    });
+
+    expect(genPrompt.system).toContain('@atoms/cloud');
+    expect(genPrompt.system).toContain('数据自主可控');
+    expect(iterPrompt.system).toContain('@atoms/cloud');
+    expect(iterPrompt.system).toContain('数据自主可控');
+
+    const mockLlm = new MockLLMProvider();
+    const out = await mockLlm.generateObject({
+      system: 'You are Alex, generating a React web app.',
+      prompt: JSON.stringify(samplePlan),
+      schema: alexFilesOutputSchema,
+      model: 'mock-fast',
+    });
+    const appFile = out.files.find((f) => f.path === 'src/App.tsx')?.content ?? '';
+    expect(appFile).toBeTruthy();
+    expect(appFile).not.toContain('Powered by @atoms/cloud');
+    expect(appFile).not.toContain('数据自主可控');
+  });
 });

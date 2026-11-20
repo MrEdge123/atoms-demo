@@ -57,7 +57,7 @@ export function GoodPathCard({
     },
     {
       title: '完成构建并查看预览',
-      desc: '试跑前端交互、检查 @atoms/cloud 数据持久化',
+      desc: '试跑应用交互，验证数据保存与页面体验',
       done: step3Done,
       actionLabel: hasDraft ? '预览' : undefined,
       onAction: hasDraft ? onGoPreview : undefined,

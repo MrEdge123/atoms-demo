@@ -7,6 +7,7 @@ import {
   Check,
   CheckCircle2,
   ChevronDown,
+  ChevronUp,
   Code2,
   Copy,
   Database,
@@ -67,6 +68,7 @@ import {
 } from './atoms/AtomsMark';
 import { GoodPathCard } from './atoms/GoodPathCard';
 import { LauncherView, type DemoIdeaPreset } from './atoms/LauncherView';
+import { ProjectItemMenu } from './atoms/ProjectItemMenu';
 import { SharePublishPopover } from './atoms/SharePublishPopover';
 import { StyleThemeModal } from './atoms/StyleThemeModal';
 import { TimelineStream } from './atoms/TimelineStream';
@@ -86,21 +88,45 @@ interface ProjectSnapshotResponse {
 const DEMO_IDEAS: DemoIdeaPreset[] = [
   {
     label: '活动报名与签到站',
+    category: '活动与预约',
     tag: '报名 · 签到 · CSV',
     desc: '含参会者注册登录、活动日程、在线报名与现场签到状态切换，支持 Pro 会员导出 CSV。',
     idea: '做一个科技沙龙活动报名与现场签到管理系统，支持参会者注册登录、报名表单提交、签到状态切换与 Pro 会员 CSV 导出。',
   },
   {
     label: 'PulseCRM 轻量客户台',
+    category: '效率与 SaaS',
     tag: '线索 · 筛选 · 导出',
     desc: '面向独立顾问的客户线索录入、跟进阶段管理、关键词搜索筛选与 Pro 导出。',
     idea: '做一个独立顾问用的轻量 CRM 客户跟进台，支持线索录入、跟进状态管理、搜索筛选和 Pro 会员导出。',
   },
   {
     label: 'InkVault 云端笔记站',
+    category: '效率与 SaaS',
     tag: '认证 · 笔记 · 导出',
     desc: '支持终端账号隔离、标签分类搜索、笔记持久化存储与 Pro 高级导出。',
     idea: '做一个支持账号隔离、标签搜索与 Pro 会员高级导出的云端个人笔记站。',
+  },
+  {
+    label: '精品咖啡烘焙品鉴预约',
+    category: '内容与品牌',
+    tag: '菜单 · 预约 · 会员',
+    desc: '暖色调品牌展陈首页，含当季单品豆单、线下杯测席位预约与品鉴笔记会员记录。',
+    idea: '做一个温暖克制的精品咖啡烘焙工坊官网与线下品鉴预约站，包含当季手冲豆单展示、线上杯测席位预约表单与会员收藏记录。',
+  },
+  {
+    label: '独立设计师作品集与约稿',
+    category: '内容与品牌',
+    tag: '作品集 · 询单 · 表单',
+    desc: '高留白画册级案例展示站，支持服务报价方案对比与客户商业合作询单沉淀。',
+    idea: '做一个高留白编辑风的独立设计师个人作品集与商业约稿站，展示精选设计案例、服务档位说明与客户合作意向提交表单。',
+  },
+  {
+    label: '团队周报与 OKR 看板',
+    category: '效率与 SaaS',
+    tag: '目标 · 进度 · 协作',
+    desc: '按季度维度管理关键目标、更新进度打分与团队成员周报归档与筛选。',
+    idea: '做一个小微团队使用的季度 OKR 进度与周报协作看板，支持成员注册登录、目标拆解、周报提交、状态筛选与数据导出。',
   },
 ];
 
@@ -182,6 +208,12 @@ export function Workbench() {
   const [composerText, setComposerText] = useState('');
   const [buildMode, setBuildMode] = useState<'linear' | 'race'>('linear');
   const [editablePlan, setEditablePlan] = useState<ProductPlan | null>(null);
+  const [optimisticPrompt, setOptimisticPrompt] = useState<{
+    projectId: string;
+    text: string;
+    timestamp: string;
+  } | null>(null);
+  const [confirmedPlanExpanded, setConfirmedPlanExpanded] = useState(false);
 
   const [customThemes, setCustomThemes] = useState<StyleThemeSpec[]>([]);
   const [selectedThemeId, setSelectedThemeId] = useState<string>('auto');
@@ -526,12 +558,6 @@ export function Workbench() {
     return () => window.removeEventListener('message', handleFrameMessage);
   }, []);
 
-  useEffect(() => {
-    if (chatScrollRef.current && viewMode === 'workspace') {
-      chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
-    }
-  }, [events.length, editablePlan, viewMode]);
-
   const project = snapshot?.project ?? null;
   const draftFiles = useMemo(() => project?.draftFiles ?? {}, [project]);
   const fileNames = useMemo(() => Object.keys(draftFiles), [draftFiles]);
@@ -559,6 +585,19 @@ export function Workbench() {
     : null;
   const isMutationLocked = Boolean(iterateBlockReason);
 
+  useEffect(() => {
+    if (chatScrollRef.current && viewMode === 'workspace') {
+      chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
+    }
+  }, [
+    events.length,
+    optimisticPrompt,
+    busyAction,
+    hasPendingPlanConfirmation,
+    editablePlan?.appName,
+    viewMode,
+  ]);
+
   async function openProjectInWorkspace(projectId: string) {
     setErrorMsg('');
     setRuntimeError('');
@@ -570,6 +609,8 @@ export function Workbench() {
     setCodeSaveBanner(null);
     setCodeCompileErrors([]);
     setComposerText('');
+    setOptimisticPrompt(null);
+    setConfirmedPlanExpanded(false);
     activeIdRef.current = projectId;
     hasAcceptedSnapshotRef.current = false;
     setActiveId(projectId);
@@ -622,6 +663,8 @@ export function Workbench() {
     setCodeSaveBanner(null);
     setCodeCompileErrors([]);
     setComposerText('');
+    setOptimisticPrompt(null);
+    setConfirmedPlanExpanded(false);
     try {
       const created = await createNewProject();
       setSnapshot(null);
@@ -638,14 +681,28 @@ export function Workbench() {
     }
   }
 
-  async function startSopForProject(projectId: string, ideaText: string) {
+  async function startSopForProject(
+    projectId: string,
+    ideaText: string,
+    opts?: { clearComposer?: boolean }
+  ) {
     const trimmed = ideaText.trim();
     if (!trimmed) return;
+    const shouldClearComposer = Boolean(opts?.clearComposer);
+    if (shouldClearComposer) {
+      setComposerText('');
+    }
     setErrorMsg('');
     setRuntimeError('');
     setShareOpen(false);
+    setOptimisticPrompt({
+      projectId,
+      text: trimmed,
+      timestamp: new Date().toISOString(),
+    });
     setBusyAction('Iris / Emma 正在分析需求...');
     let streamError = '';
+    let sawRoleStart = false;
     const isCurrentProject = () =>
       !activeIdRef.current || activeIdRef.current === projectId;
     try {
@@ -659,6 +716,12 @@ export function Workbench() {
         }),
       });
       await readSseStream(res, (ev) => {
+        if (ev.type === 'role_start') {
+          sawRoleStart = true;
+          setOptimisticPrompt((cur) =>
+            cur?.projectId === projectId ? null : cur
+          );
+        }
         if (isCurrentProject()) {
           setEvents((prev) => [...prev, ev]);
         }
@@ -674,25 +737,35 @@ export function Workbench() {
         if (streamError) {
           setErrorMsg(streamError);
         }
-        setComposerText('');
       }
     } catch (err) {
+      if (!sawRoleStart && shouldClearComposer && isCurrentProject()) {
+        setComposerText(trimmed);
+      }
       if (isCurrentProject()) {
         setErrorMsg(err instanceof Error ? err.message : String(err));
       }
     } finally {
+      setOptimisticPrompt((cur) =>
+        cur?.projectId === projectId ? null : cur
+      );
       setBusyAction('');
     }
   }
 
-  async function handleLauncherSubmit() {
-    const trimmed = launcherIdea.trim();
+  async function handleLauncherSubmit(overrideIdea?: string) {
+    const trimmed = (overrideIdea ?? launcherIdea).trim();
     if (!trimmed || busyAction) return;
     setErrorMsg('');
     setRuntimeError('');
     setShareOpen(false);
     try {
       const created = await createNewProject('AI 构建新项目');
+      if (!overrideIdea) {
+        setLauncherIdea('');
+      }
+      setOptimisticPrompt(null);
+      setConfirmedPlanExpanded(false);
       hasAcceptedSnapshotRef.current = true;
       setSnapshot({
         project: created,
@@ -723,6 +796,7 @@ export function Workbench() {
     setErrorMsg('');
     setRuntimeError('');
     setShareOpen(false);
+    setConfirmedPlanExpanded(false);
     setBusyAction(
       buildMode === 'race'
         ? 'Race Mode 并行生成双方案中...'
@@ -751,6 +825,7 @@ export function Workbench() {
       const latest = await loadSnapshot(targetId);
       void refreshProjectsList(targetId).catch(() => null);
       if (isCurrentProject()) {
+        setConfirmedPlanExpanded(false);
         if (latest.data && Object.keys(latest.data.project.draftFiles).length > 0) {
           setComposerMode('iterate');
         }
@@ -811,15 +886,29 @@ export function Workbench() {
     }
   }
 
-  async function handleIterate(customInstruction?: string) {
+  async function handleIterate(
+    customInstruction?: string,
+    opts?: { clearComposer?: boolean }
+  ) {
     const instruction = (customInstruction ?? composerText).trim();
     if (!activeId || !instruction || iterateBlockReason || busyAction) return;
     const targetId = activeId;
+    const shouldClearComposer =
+      opts?.clearComposer ?? customInstruction === undefined;
+    if (shouldClearComposer) {
+      setComposerText('');
+    }
     setErrorMsg('');
     setRuntimeError('');
     setShareOpen(false);
+    setOptimisticPrompt({
+      projectId: targetId,
+      text: instruction,
+      timestamp: new Date().toISOString(),
+    });
     setBusyAction('Alex 正在按指令迭代修改...');
     let streamError = '';
+    let sawRoleStart = false;
     const isCurrentProject = () =>
       !activeIdRef.current || activeIdRef.current === targetId;
     try {
@@ -832,6 +921,12 @@ export function Workbench() {
         }),
       });
       await readSseStream(res, (ev) => {
+        if (ev.type === 'role_start') {
+          sawRoleStart = true;
+          setOptimisticPrompt((cur) =>
+            cur?.projectId === targetId ? null : cur
+          );
+        }
         if (isCurrentProject()) {
           setEvents((prev) => [...prev, ev]);
         }
@@ -841,17 +936,22 @@ export function Workbench() {
       await loadSnapshot(targetId);
       void refreshProjectsList(targetId).catch(() => null);
       if (isCurrentProject()) {
-        if (!customInstruction) setComposerText('');
         if (streamError) {
           setErrorMsg(streamError);
         }
         setRightTab('preview');
       }
     } catch (err) {
+      if (!sawRoleStart && shouldClearComposer && isCurrentProject()) {
+        setComposerText(instruction);
+      }
       if (isCurrentProject()) {
         setErrorMsg(err instanceof Error ? err.message : String(err));
       }
     } finally {
+      setOptimisticPrompt((cur) =>
+        cur?.projectId === targetId ? null : cur
+      );
       setBusyAction('');
     }
   }
@@ -894,14 +994,15 @@ export function Workbench() {
     const text = composerText.trim();
     if (!text || busyAction) return;
 
-    if (composerMode === 'iterate') {
+    const activeComposerMode = hasDraft ? composerMode : 'restart';
+    if (activeComposerMode === 'iterate') {
       if (isMutationLocked) return;
-      await handleIterate(text);
+      await handleIterate(text, { clearComposer: true });
       return;
     }
 
     const pid = activeId ?? (await createNewProject('新应用项目')).id;
-    await startSopForProject(pid, text);
+    await startSopForProject(pid, text, { clearComposer: true });
   }
 
   function toggleCapability(cap: CloudCapability) {
@@ -916,9 +1017,12 @@ export function Workbench() {
     });
   }
 
-  async function handleRenameProject(projectId: string, nextTitle: string) {
+  async function handleRenameProject(
+    projectId: string,
+    nextTitle: string
+  ): Promise<boolean> {
     const trimmed = nextTitle.trim();
-    if (!trimmed) return;
+    if (!trimmed) return false;
     setErrorMsg('');
     try {
       const res = await workbenchFetch(`/api/projects/${projectId}`, {
@@ -940,8 +1044,10 @@ export function Workbench() {
           : prev
       );
       setRenamingProject(false);
+      return true;
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : String(err));
+      return false;
     }
   }
 
@@ -966,6 +1072,8 @@ export function Workbench() {
         setSnapshot(null);
         setEvents([]);
         setEditablePlan(null);
+        setOptimisticPrompt(null);
+        setConfirmedPlanExpanded(false);
         setSelectedFile('');
         setIsEditingCode(false);
         setCodeSaveBanner(null);
@@ -1066,6 +1174,8 @@ export function Workbench() {
     setProjectMenuOpen(false);
     setRenamingProject(false);
     setConfirmDeleteProjectId(null);
+    setOptimisticPrompt(null);
+    setConfirmedPlanExpanded(false);
     setIsEditingCode(false);
     setCodeSaveBanner(null);
     setCodeCompileErrors([]);
@@ -1090,9 +1200,12 @@ export function Workbench() {
           onOpenThemeModal={() => setThemeModalMode('launcher')}
           busyAction={busyAction}
           errorMsg={errorMsg}
-          onSubmitIdea={() => void handleLauncherSubmit()}
+          onSubmitIdea={(customIdea) => void handleLauncherSubmit(customIdea)}
           onOpenProject={(pid) => void openProjectInWorkspace(pid)}
           onCreateBlankProject={() => void handleNewBlankProject()}
+          onRenameProject={(pid, nextTitle) =>
+            handleRenameProject(pid, nextTitle)
+          }
           onDeleteProject={(pid) => void handleDeleteProject(pid)}
         />
         <StyleThemeModal
@@ -1120,6 +1233,313 @@ export function Workbench() {
     selectedFile && draftFiles[selectedFile]
       ? draftFiles[selectedFile].split('\n')
       : [];
+
+  const shouldFoldConfirmedPlan = Boolean(
+    editablePlan && hasDraft && !hasPendingPlanConfirmation
+  );
+
+  const emmaPlanCard = editablePlan ? (
+    <div
+      className={`rounded-2xl bg-white p-3.5 space-y-3 shadow-[0_1px_4px_rgba(12,12,12,0.04)] ${
+        hasPendingPlanConfirmation
+          ? 'border border-[#4267ff]/45 ring-2 ring-[#4267ff]/10'
+          : 'border border-black/[0.08]'
+      }`}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <AgentBadge role="emma" />
+          <span className="text-xs font-semibold text-[#0c0c0c]/95">
+            Emma 产品方案确认卡
+          </span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          {hasPendingPlanConfirmation ? (
+            <span className="rounded-full bg-amber-500/12 border border-amber-600/20 px-2 py-0.5 text-[10px] font-semibold text-amber-800">
+              {isPlanning ? '方案生成中' : '待确认新方案'}
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-700">
+              <CheckCircle2 className="w-3 h-3" />
+              已确认方案
+            </span>
+          )}
+        </div>
+      </div>
+
+      {hasPendingPlanConfirmation && hasDraft && (
+        <div className="rounded-xl border border-amber-500/25 bg-amber-500/[0.08] px-2.5 py-2 text-[11px] text-amber-900 leading-relaxed">
+          已有草稿与已发布线上版本在确认前保持不变；确认后 Alex 将按新方案重建草稿。
+        </div>
+      )}
+
+      <div className="space-y-2">
+        <input
+          type="text"
+          aria-label="应用名称"
+          value={editablePlan.appName}
+          onChange={(e) =>
+            setEditablePlan({
+              ...editablePlan,
+              appName: e.target.value,
+            })
+          }
+          className="w-full rounded-xl border border-black/[0.1] bg-[#fcfcfb] px-3 py-1.5 text-xs font-semibold text-[#0c0c0c]/95 focus:border-[#4267ff] focus:bg-white focus:outline-none"
+        />
+        <textarea
+          rows={2}
+          aria-label="应用摘要"
+          value={editablePlan.summary}
+          onChange={(e) =>
+            setEditablePlan({
+              ...editablePlan,
+              summary: e.target.value,
+            })
+          }
+          className="w-full rounded-xl border border-black/[0.1] bg-[#fcfcfb] px-3 py-1.5 text-xs text-[#0c0c0c]/75 focus:border-[#4267ff] focus:bg-white focus:outline-none"
+        />
+      </div>
+
+      <div className="flex flex-wrap gap-1.5">
+        {ALL_CAPABILITIES.map((cap) => {
+          const active = editablePlan.capabilities.includes(cap.id);
+          return (
+            <button
+              key={cap.id}
+              type="button"
+              onClick={() => toggleCapability(cap.id)}
+              className={
+                active
+                  ? 'rounded-full bg-[#4267ff]/12 border border-[#4267ff]/30 px-2.5 py-0.5 text-[11px] font-medium text-[#4267ff] cursor-pointer'
+                  : 'rounded-full border border-black/[0.08] bg-[#f8f8f6] px-2.5 py-0.5 text-[11px] text-[#0c0c0c]/55 hover:text-[#0c0c0c] cursor-pointer'
+              }
+            >
+              {cap.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* UI Design System & Style Theme Decision Card */}
+      <div className="rounded-xl border border-black/[0.08] bg-[#f8f8f6] p-2.5 space-y-2">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <Palette className="w-3.5 h-3.5 text-[#4267ff] shrink-0" />
+            <span className="text-[11px] font-semibold text-[#0c0c0c]/90 truncate">
+              {editablePlan.designSystem
+                ? `UI 场景 ${editablePlan.designSystem.scenario} · ${editablePlan.designSystem.scenarioName}`
+                : 'UI 设计方案'}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setThemeModalMode('emma')}
+            className="inline-flex items-center gap-1 rounded-full border border-black/[0.1] bg-white px-2.5 py-0.5 text-[10px] font-medium text-[#4267ff] hover:border-[#4267ff]/40 cursor-pointer shrink-0"
+          >
+            {editablePlan.designSystem?.themeName
+              ? `已选：${editablePlan.designSystem.themeName}`
+              : '切换主题 / 自定义'}
+          </button>
+        </div>
+
+        {editablePlan.designSystem && (
+          <>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5">
+                {(
+                  [
+                    {
+                      label: '底色',
+                      hex: editablePlan.designSystem.palette.background,
+                    },
+                    {
+                      label: '表面',
+                      hex: editablePlan.designSystem.palette.surface,
+                    },
+                    {
+                      label: '主字',
+                      hex: editablePlan.designSystem.palette.textPrimary,
+                    },
+                    {
+                      label: '辅字',
+                      hex: editablePlan.designSystem.palette.textMuted,
+                    },
+                    {
+                      label: '强调',
+                      hex: editablePlan.designSystem.palette.accent,
+                    },
+                  ] as const
+                ).map((sw) => (
+                  <span
+                    key={sw.label}
+                    title={`${sw.label}: ${sw.hex}`}
+                    className="w-4 h-4 rounded-full border border-black/15 shrink-0"
+                    style={{ backgroundColor: sw.hex }}
+                  />
+                ))}
+                <span className="text-[10px] text-[#0c0c0c]/55 ml-1">
+                  {editablePlan.designSystem.typography.headingStyle ===
+                  'editorial-serif'
+                    ? '衬线编辑标题'
+                    : editablePlan.designSystem.typography.headingStyle ===
+                        'geometric-sans'
+                      ? '几何无衬线'
+                      : '极简无衬线'}
+                </span>
+              </div>
+
+              <div className="flex items-center gap-1">
+                <select
+                  aria-label="调整 UI 设计场景"
+                  value={editablePlan.designSystem.scenario}
+                  onChange={(e) => {
+                    const nextId = e.target.value as DesignScenarioId;
+                    const nextDef = DESIGN_SCENARIOS[nextId];
+                    const prevDs = editablePlan.designSystem!;
+                    const matchedTheme = prevDs.themeId
+                      ? allThemes.find((t) => t.id === prevDs.themeId)
+                      : undefined;
+                    const nextCustomStylePrompt =
+                      prevDs.themeId &&
+                      (!matchedTheme ||
+                        prevDs.customStylePrompt === matchedTheme.stylePrompt)
+                        ? undefined
+                        : prevDs.customStylePrompt;
+                    setEditablePlan({
+                      ...editablePlan,
+                      designSystem: {
+                        ...prevDs,
+                        scenario: nextId,
+                        scenarioName: nextDef.name,
+                        tone: nextDef.toneKeywords,
+                        colorMode: nextDef.defaultColorMode,
+                        palette: { ...nextDef.defaultPalette },
+                        typography: { ...nextDef.defaultTypography },
+                        radiusStyle: nextDef.defaultRadiusStyle,
+                        surfaceDepth: nextDef.defaultSurfaceDepth,
+                        layoutBlueprint: nextDef.layoutRules,
+                        motionStyle: nextDef.motionRules,
+                        mediaStrategy: nextDef.mediaRule,
+                        antiPatterns: nextDef.antiPatterns,
+                        themeId: undefined,
+                        themeName: undefined,
+                        customStylePrompt: nextCustomStylePrompt,
+                      },
+                    });
+                  }}
+                  className="rounded-lg border border-black/[0.1] bg-white px-1.5 py-0.5 text-[10px] text-[#0c0c0c]/80 focus:border-[#4267ff] focus:outline-none"
+                >
+                  {(Object.keys(DESIGN_SCENARIOS) as DesignScenarioId[]).map(
+                    (sid) => (
+                      <option key={sid} value={sid}>
+                        场景 {sid} · {DESIGN_SCENARIOS[sid].shortLabel}
+                      </option>
+                    )
+                  )}
+                </select>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    const prevDs = editablePlan.designSystem!;
+                    const nextMode =
+                      prevDs.colorMode === 'dark' ? 'light' : 'dark';
+                    setEditablePlan({
+                      ...editablePlan,
+                      designSystem: {
+                        ...prevDs,
+                        colorMode: nextMode,
+                        palette:
+                          nextMode === 'dark'
+                            ? {
+                                ...prevDs.palette,
+                                background: '#0E0F12',
+                                surface: '#16181E',
+                                textPrimary: '#F3F2EE',
+                                textMuted: '#9B9A94',
+                              }
+                            : {
+                                ...prevDs.palette,
+                                background: '#FAF8F4',
+                                surface: '#FFFFFF',
+                                textPrimary: '#1D1916',
+                                textMuted: '#6E665E',
+                              },
+                      },
+                    });
+                  }}
+                  className="rounded-lg border border-black/[0.1] bg-white px-2 py-0.5 text-[10px] font-medium text-[#0c0c0c]/75 hover:bg-black/[0.04] cursor-pointer"
+                >
+                  {editablePlan.designSystem.colorMode === 'dark'
+                    ? '深色'
+                    : '浅色'}
+                </button>
+              </div>
+            </div>
+
+            <p className="text-[11px] text-[#0c0c0c]/65 leading-relaxed line-clamp-2">
+              焦点：{editablePlan.designSystem.visualFocalPoint}
+            </p>
+
+            <input
+              type="text"
+              aria-label="自定义风格提示词微调"
+              maxLength={2000}
+              value={editablePlan.designSystem.customStylePrompt ?? ''}
+              onChange={(e) => {
+                const prevDs = editablePlan.designSystem!;
+                setEditablePlan({
+                  ...editablePlan,
+                  designSystem: {
+                    ...prevDs,
+                    customStylePrompt: e.target.value,
+                  },
+                });
+              }}
+              placeholder="补充风格微调（如：大留白编辑风、不要统计卡片、用陶土棕点缀）..."
+              className="w-full rounded-lg border border-black/[0.08] bg-white px-2.5 py-1 text-[11px] text-[#0c0c0c]/85 placeholder:text-[#0c0c0c]/35 focus:border-[#4267ff] focus:outline-none"
+            />
+          </>
+        )}
+      </div>
+
+      {/* Linear vs Race Mode Segmented Switch */}
+      <div className="grid grid-cols-2 rounded-full bg-black/[0.04] p-0.5 border border-black/[0.06]">
+        <button
+          type="button"
+          onClick={() => setBuildMode('linear')}
+          className={
+            buildMode === 'linear'
+              ? 'rounded-full bg-white py-1.5 text-xs font-medium text-[#0c0c0c] shadow-[0_1px_2px_rgba(12,12,12,0.06)] cursor-pointer'
+              : 'rounded-full py-1.5 text-xs text-[#0c0c0c]/55 hover:text-[#0c0c0c] cursor-pointer'
+          }
+        >
+          标准单路生成
+        </button>
+        <button
+          type="button"
+          onClick={() => setBuildMode('race')}
+          className={
+            buildMode === 'race'
+              ? 'rounded-full bg-white py-1.5 text-xs font-medium text-[#4267ff] shadow-[0_1px_2px_rgba(12,12,12,0.06)] inline-flex items-center justify-center gap-1 cursor-pointer'
+              : 'rounded-full py-1.5 text-xs text-[#0c0c0c]/55 hover:text-[#0c0c0c] inline-flex items-center justify-center gap-1 cursor-pointer'
+          }
+        >
+          <Zap className="w-3.5 h-3.5 text-amber-500" />
+          Race Mode (双风格)
+        </button>
+      </div>
+
+      <button
+        type="button"
+        disabled={Boolean(busyAction) || isPlanning || isBuilding}
+        onClick={() => void handleConfirmAndBuild()}
+        className="w-full rounded-full bg-[#4267ff] px-4 py-2 text-xs font-semibold text-white hover:bg-[#425ce1] transition disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer"
+      >
+        {busyAction || '确认方案并让 Alex 开始构建'}
+      </button>
+    </div>
+  ) : null;
 
   return (
     <div className="h-screen flex flex-col bg-[#f3f3f0] text-[#0c0c0c]/95 overflow-hidden">
@@ -1465,26 +1885,44 @@ export function Workbench() {
               {projects.map((p) => {
                 const active = p.id === activeId;
                 return (
-                  <button
+                  <div
                     key={p.id}
-                    type="button"
-                    onClick={() => void openProjectInWorkspace(p.id)}
-                    className={`w-full text-left rounded-xl px-2.5 py-2 transition cursor-pointer ${
+                    className={`group flex items-center gap-1 rounded-xl px-2 py-1.5 transition ${
                       active
                         ? 'bg-white border border-black/[0.08] shadow-[0_1px_2px_rgba(12,12,12,0.04)]'
                         : 'hover:bg-black/[0.04]'
                     }`}
                   >
-                    <div className="text-xs font-medium text-[#0c0c0c]/90 truncate">
-                      {p.title}
-                    </div>
-                    <div className="mt-1">
-                      <StatusPill
-                        status={p.status}
-                        publishedVersion={p.publishedVersion}
-                      />
-                    </div>
-                  </button>
+                    <button
+                      type="button"
+                      onClick={() => void openProjectInWorkspace(p.id)}
+                      className="flex-1 min-w-0 text-left px-0.5 py-0.5 cursor-pointer"
+                    >
+                      <div className="text-xs font-medium text-[#0c0c0c]/90 truncate">
+                        {p.title}
+                      </div>
+                      <div className="mt-1">
+                        <StatusPill
+                          status={p.status}
+                          publishedVersion={p.publishedVersion}
+                        />
+                      </div>
+                    </button>
+                    <ProjectItemMenu
+                      projectId={p.id}
+                      title={p.title}
+                      publishedSlug={p.publishedVersion > 0 ? p.slug : null}
+                      isReadOnly={p.ownerSid === null}
+                      disableDelete={
+                        Boolean(busyAction) ||
+                        ((isPlanning || isBuilding) && p.id === activeId)
+                      }
+                      onOpen={() => void openProjectInWorkspace(p.id)}
+                      onRename={(pid, title) => handleRenameProject(pid, title)}
+                      onDelete={(pid) => void handleDeleteProject(pid)}
+                      variant="subtle"
+                    />
+                  </div>
                 );
               })}
             </div>
@@ -1551,316 +1989,47 @@ export function Workbench() {
               </div>
             )}
 
+            {shouldFoldConfirmedPlan && editablePlan && (
+              <div className="rounded-2xl border border-black/[0.08] bg-white px-3 py-2 shadow-[0_1px_3px_rgba(12,12,12,0.03)] space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <AgentBadge role="emma" />
+                    <span className="text-xs font-medium text-[#0c0c0c]/85 truncate">
+                      已确认产品方案 · {editablePlan.appName}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setConfirmedPlanExpanded((v) => !v)}
+                    className="inline-flex items-center gap-1 rounded-full border border-black/[0.08] bg-[#f8f8f6] px-2.5 py-1 text-[11px] font-medium text-[#0c0c0c]/75 hover:text-[#0c0c0c] transition shrink-0 cursor-pointer"
+                  >
+                    <span>{confirmedPlanExpanded ? '收起方案' : '展开调整'}</span>
+                    {confirmedPlanExpanded ? (
+                      <ChevronUp className="w-3 h-3" />
+                    ) : (
+                      <ChevronDown className="w-3 h-3" />
+                    )}
+                  </button>
+                </div>
+                {confirmedPlanExpanded && emmaPlanCard}
+              </div>
+            )}
+
             <TimelineStream
               events={events}
               onOpenPreview={() => setRightTab('preview')}
               onOpenCode={() => setRightTab('code')}
             />
 
-            {/* Emma Confirmation Card */}
-            {editablePlan && (
-              <div
-                className={`rounded-2xl bg-white p-3.5 space-y-3 shadow-[0_1px_4px_rgba(12,12,12,0.04)] ${
-                  hasPendingPlanConfirmation
-                    ? 'border border-[#4267ff]/45 ring-2 ring-[#4267ff]/10'
-                    : 'border border-black/[0.08]'
-                }`}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
-                    <AgentBadge role="emma" />
-                    <span className="text-xs font-semibold text-[#0c0c0c]/95">
-                      Emma 产品方案确认卡
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    {hasPendingPlanConfirmation ? (
-                      <span className="rounded-full bg-amber-500/12 border border-amber-600/20 px-2 py-0.5 text-[10px] font-semibold text-amber-800">
-                        {isPlanning ? '方案生成中' : '待确认新方案'}
-                      </span>
-                    ) : (
-                      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-700">
-                        <CheckCircle2 className="w-3 h-3" />
-                        已确认方案
-                      </span>
-                    )}
-                  </div>
+            {optimisticPrompt && optimisticPrompt.projectId === activeId && (
+              <div className="flex flex-col items-end space-y-1">
+                <div className="max-w-[90%] rounded-2xl rounded-tr-sm bg-[#ebebea] px-3.5 py-2.5 text-xs text-[#0c0c0c]/90 leading-relaxed whitespace-pre-wrap break-words">
+                  {optimisticPrompt.text}
                 </div>
-
-                {hasPendingPlanConfirmation && hasDraft && (
-                  <div className="rounded-xl border border-amber-500/25 bg-amber-500/[0.08] px-2.5 py-2 text-[11px] text-amber-900 leading-relaxed">
-                    已有草稿与已发布线上版本在确认前保持不变；确认后 Alex 将按新方案重建草稿。
-                  </div>
-                )}
-
-                <div className="space-y-2">
-                  <input
-                    type="text"
-                    aria-label="应用名称"
-                    value={editablePlan.appName}
-                    onChange={(e) =>
-                      setEditablePlan({
-                        ...editablePlan,
-                        appName: e.target.value,
-                      })
-                    }
-                    className="w-full rounded-xl border border-black/[0.1] bg-[#fcfcfb] px-3 py-1.5 text-xs font-semibold text-[#0c0c0c]/95 focus:border-[#4267ff] focus:bg-white focus:outline-none"
-                  />
-                  <textarea
-                    rows={2}
-                    aria-label="应用摘要"
-                    value={editablePlan.summary}
-                    onChange={(e) =>
-                      setEditablePlan({
-                        ...editablePlan,
-                        summary: e.target.value,
-                      })
-                    }
-                    className="w-full rounded-xl border border-black/[0.1] bg-[#fcfcfb] px-3 py-1.5 text-xs text-[#0c0c0c]/75 focus:border-[#4267ff] focus:bg-white focus:outline-none"
-                  />
-                </div>
-
-                <div className="flex flex-wrap gap-1.5">
-                  {ALL_CAPABILITIES.map((cap) => {
-                    const active = editablePlan.capabilities.includes(cap.id);
-                    return (
-                      <button
-                        key={cap.id}
-                        type="button"
-                        onClick={() => toggleCapability(cap.id)}
-                        className={
-                          active
-                            ? 'rounded-full bg-[#4267ff]/12 border border-[#4267ff]/30 px-2.5 py-0.5 text-[11px] font-medium text-[#4267ff] cursor-pointer'
-                            : 'rounded-full border border-black/[0.08] bg-[#f8f8f6] px-2.5 py-0.5 text-[11px] text-[#0c0c0c]/55 hover:text-[#0c0c0c] cursor-pointer'
-                        }
-                      >
-                        {cap.label}
-                      </button>
-                    );
-                  })}
-                </div>
-
-                {/* UI Design System & Style Theme Decision Card */}
-                <div className="rounded-xl border border-black/[0.08] bg-[#f8f8f6] p-2.5 space-y-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-1.5 min-w-0">
-                      <Palette className="w-3.5 h-3.5 text-[#4267ff] shrink-0" />
-                      <span className="text-[11px] font-semibold text-[#0c0c0c]/90 truncate">
-                        {editablePlan.designSystem
-                          ? `UI 场景 ${editablePlan.designSystem.scenario} · ${editablePlan.designSystem.scenarioName}`
-                          : 'UI 设计方案'}
-                      </span>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setThemeModalMode('emma')}
-                      className="inline-flex items-center gap-1 rounded-full border border-black/[0.1] bg-white px-2.5 py-0.5 text-[10px] font-medium text-[#4267ff] hover:border-[#4267ff]/40 cursor-pointer shrink-0"
-                    >
-                      {editablePlan.designSystem?.themeName
-                        ? `已选：${editablePlan.designSystem.themeName}`
-                        : '切换主题 / 自定义'}
-                    </button>
-                  </div>
-
-                  {editablePlan.designSystem && (
-                    <>
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <div className="flex items-center gap-1.5">
-                          {(
-                            [
-                              {
-                                label: '底色',
-                                hex: editablePlan.designSystem.palette.background,
-                              },
-                              {
-                                label: '表面',
-                                hex: editablePlan.designSystem.palette.surface,
-                              },
-                              {
-                                label: '主字',
-                                hex: editablePlan.designSystem.palette.textPrimary,
-                              },
-                              {
-                                label: '辅字',
-                                hex: editablePlan.designSystem.palette.textMuted,
-                              },
-                              {
-                                label: '强调',
-                                hex: editablePlan.designSystem.palette.accent,
-                              },
-                            ] as const
-                          ).map((sw) => (
-                            <span
-                              key={sw.label}
-                              title={`${sw.label}: ${sw.hex}`}
-                              className="w-4 h-4 rounded-full border border-black/15 shrink-0"
-                              style={{ backgroundColor: sw.hex }}
-                            />
-                          ))}
-                          <span className="text-[10px] text-[#0c0c0c]/55 ml-1">
-                            {editablePlan.designSystem.typography.headingStyle ===
-                            'editorial-serif'
-                              ? '衬线编辑标题'
-                              : editablePlan.designSystem.typography.headingStyle ===
-                                  'geometric-sans'
-                                ? '几何无衬线'
-                                : '极简无衬线'}
-                          </span>
-                        </div>
-
-                        <div className="flex items-center gap-1">
-                          <select
-                            aria-label="调整 UI 设计场景"
-                            value={editablePlan.designSystem.scenario}
-                            onChange={(e) => {
-                              const nextId = e.target.value as DesignScenarioId;
-                              const nextDef = DESIGN_SCENARIOS[nextId];
-                              const prevDs = editablePlan.designSystem!;
-                              const matchedTheme = prevDs.themeId
-                                ? allThemes.find((t) => t.id === prevDs.themeId)
-                                : undefined;
-                              const nextCustomStylePrompt =
-                                prevDs.themeId &&
-                                (!matchedTheme ||
-                                  prevDs.customStylePrompt ===
-                                    matchedTheme.stylePrompt)
-                                  ? undefined
-                                  : prevDs.customStylePrompt;
-                              setEditablePlan({
-                                ...editablePlan,
-                                designSystem: {
-                                  ...prevDs,
-                                  scenario: nextId,
-                                  scenarioName: nextDef.name,
-                                  tone: nextDef.toneKeywords,
-                                  colorMode: nextDef.defaultColorMode,
-                                  palette: { ...nextDef.defaultPalette },
-                                  typography: { ...nextDef.defaultTypography },
-                                  radiusStyle: nextDef.defaultRadiusStyle,
-                                  surfaceDepth: nextDef.defaultSurfaceDepth,
-                                  layoutBlueprint: nextDef.layoutRules,
-                                  motionStyle: nextDef.motionRules,
-                                  mediaStrategy: nextDef.mediaRule,
-                                  antiPatterns: nextDef.antiPatterns,
-                                  themeId: undefined,
-                                  themeName: undefined,
-                                  customStylePrompt: nextCustomStylePrompt,
-                                },
-                              });
-                            }}
-                            className="rounded-lg border border-black/[0.1] bg-white px-1.5 py-0.5 text-[10px] text-[#0c0c0c]/80 focus:border-[#4267ff] focus:outline-none"
-                          >
-                            {(Object.keys(DESIGN_SCENARIOS) as DesignScenarioId[]).map(
-                              (sid) => (
-                                <option key={sid} value={sid}>
-                                  场景 {sid} · {DESIGN_SCENARIOS[sid].shortLabel}
-                                </option>
-                              )
-                            )}
-                          </select>
-
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const prevDs = editablePlan.designSystem!;
-                              const nextMode =
-                                prevDs.colorMode === 'dark' ? 'light' : 'dark';
-                              setEditablePlan({
-                                ...editablePlan,
-                                designSystem: {
-                                  ...prevDs,
-                                  colorMode: nextMode,
-                                  palette:
-                                    nextMode === 'dark'
-                                      ? {
-                                          ...prevDs.palette,
-                                          background: '#0E0F12',
-                                          surface: '#16181E',
-                                          textPrimary: '#F3F2EE',
-                                          textMuted: '#9B9A94',
-                                        }
-                                      : {
-                                          ...prevDs.palette,
-                                          background: '#FAF8F4',
-                                          surface: '#FFFFFF',
-                                          textPrimary: '#1D1916',
-                                          textMuted: '#6E665E',
-                                        },
-                                },
-                              });
-                            }}
-                            className="rounded-lg border border-black/[0.1] bg-white px-2 py-0.5 text-[10px] font-medium text-[#0c0c0c]/75 hover:bg-black/[0.04] cursor-pointer"
-                          >
-                            {editablePlan.designSystem.colorMode === 'dark'
-                              ? '深色'
-                              : '浅色'}
-                          </button>
-                        </div>
-                      </div>
-
-                      <p className="text-[11px] text-[#0c0c0c]/65 leading-relaxed line-clamp-2">
-                        焦点：{editablePlan.designSystem.visualFocalPoint}
-                      </p>
-
-                      <input
-                        type="text"
-                        aria-label="自定义风格提示词微调"
-                        maxLength={2000}
-                        value={editablePlan.designSystem.customStylePrompt ?? ''}
-                        onChange={(e) => {
-                          const prevDs = editablePlan.designSystem!;
-                          setEditablePlan({
-                            ...editablePlan,
-                            designSystem: {
-                              ...prevDs,
-                              customStylePrompt: e.target.value,
-                            },
-                          });
-                        }}
-                        placeholder="补充风格微调（如：大留白编辑风、不要统计卡片、用陶土棕点缀）..."
-                        className="w-full rounded-lg border border-black/[0.08] bg-white px-2.5 py-1 text-[11px] text-[#0c0c0c]/85 placeholder:text-[#0c0c0c]/35 focus:border-[#4267ff] focus:outline-none"
-                      />
-                    </>
-                  )}
-                </div>
-
-                {/* Linear vs Race Mode Segmented Switch */}
-                <div className="grid grid-cols-2 rounded-full bg-black/[0.04] p-0.5 border border-black/[0.06]">
-                  <button
-                    type="button"
-                    onClick={() => setBuildMode('linear')}
-                    className={
-                      buildMode === 'linear'
-                        ? 'rounded-full bg-white py-1.5 text-xs font-medium text-[#0c0c0c] shadow-[0_1px_2px_rgba(12,12,12,0.06)] cursor-pointer'
-                        : 'rounded-full py-1.5 text-xs text-[#0c0c0c]/55 hover:text-[#0c0c0c] cursor-pointer'
-                    }
-                  >
-                    标准单路生成
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setBuildMode('race')}
-                    className={
-                      buildMode === 'race'
-                        ? 'rounded-full bg-white py-1.5 text-xs font-medium text-[#4267ff] shadow-[0_1px_2px_rgba(12,12,12,0.06)] inline-flex items-center justify-center gap-1 cursor-pointer'
-                        : 'rounded-full py-1.5 text-xs text-[#0c0c0c]/55 hover:text-[#0c0c0c] inline-flex items-center justify-center gap-1 cursor-pointer'
-                    }
-                  >
-                    <Zap className="w-3.5 h-3.5 text-amber-500" />
-                    Race Mode (双风格)
-                  </button>
-                </div>
-
-                <button
-                  type="button"
-                  disabled={Boolean(busyAction) || isPlanning || isBuilding}
-                  onClick={() => void handleConfirmAndBuild()}
-                  className="w-full rounded-full bg-[#4267ff] px-4 py-2 text-xs font-semibold text-white hover:bg-[#425ce1] transition disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer"
-                >
-                  {busyAction || '确认方案并让 Alex 开始构建'}
-                </button>
               </div>
             )}
+
+            {!shouldFoldConfirmedPlan && emmaPlanCard}
 
             {busyAction && (
               <div className="inline-flex items-center gap-2 rounded-full border border-[#4267ff]/20 bg-white px-3 py-1.5 text-[11px] font-medium text-[#4267ff] shadow-xs">
@@ -2040,7 +2209,7 @@ export function Workbench() {
                     <span className="font-atoms-mono text-[11px] rounded-full bg-black/[0.04] px-2.5 py-0.5 text-[#0c0c0c]/65 truncate">
                       {project?.publishedVersion
                         ? `/s/${project.slug}`
-                        : '本地内存沙箱实时预览'}
+                        : '草稿实时预览'}
                     </span>
                   </div>
                   {project?.publishedVersion ? (
@@ -2445,7 +2614,7 @@ export function Workbench() {
 
                   <div className="rounded-xl border border-black/[0.08] bg-white p-4 space-y-2">
                     <div className="text-xs font-semibold text-[#0c0c0c]/85">
-                      @atoms/cloud 已启用能力
+                      已启用云端能力
                     </div>
                     <div className="flex flex-wrap gap-1.5">
                       {project.capabilities.map((cap) => (

@@ -80,7 +80,7 @@ export function CloudDataPanel({ projectId }: CloudDataPanelProps) {
             Atoms Cloud 实时持久化数据
           </h3>
           <p className="text-xs text-[#0c0c0c]/55 mt-0.5">
-            线上站点（/s/[slug]）与预览页提交的数据均实时落入 PostgreSQL / PGlite，支持跨重启刷新查看。
+            预览页与已发布站点中提交的数据都会实时持久化保存，刷新页面不丢失。
           </p>
         </div>
         <button

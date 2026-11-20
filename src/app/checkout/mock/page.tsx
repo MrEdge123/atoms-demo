@@ -94,7 +94,7 @@ function MockCheckoutInner() {
             升级至 Pro 会员订阅
           </h1>
           <p className="text-sm text-[#0c0c0c]/60 leading-relaxed">
-            演示环境走内置模拟收银台并自动签发 HMAC Webhook 回调；生产配置 Creem Key 后将无缝跳转外部真实收银台。
+            当前为模拟收银台演示模式，不会产生真实扣款；确认后将自动触发签名回调并升级会员方案。
           </p>
         </div>
 

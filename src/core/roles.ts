@@ -91,8 +91,9 @@ STRICT RULES:
 ${sdkDocs}
 
 ${designGuide}
-6. Target ~300-520 lines total across 2-4 clean modular files ("src/App.tsx" + "src/components/*.tsx"; you do NOT need to rewrite "DESIGN.md" unless refining tokens). Keep code concise with zero bloated mock arrays or redundant comments.
-7. Return strictly valid JSON matching { "summary": string, "files": Array<{ "path": string, "content": string }> } (with optional "deletes").`,
+6. Never display internal SDK, builder, or platform terms ('@atoms/cloud', 'Powered by @atoms/cloud', '数据自主可控', 'PGlite', 'Esbuild', 'Route A+') anywhere in visible UI headings, badges, or footers — all visible UI copy must belong strictly to the user's product brand.
+7. Target ~300-520 lines total across 2-4 clean modular files ("src/App.tsx" + "src/components/*.tsx"; you do NOT need to rewrite "DESIGN.md" unless refining tokens). Keep code concise with zero bloated mock arrays or redundant comments.
+8. Return strictly valid JSON matching { "summary": string, "files": Array<{ "path": string, "content": string }> } (with optional "deletes").`,
     prompt: `Build the application described by this confirmed ProductPlan:
 ${JSON.stringify(input.plan, null, 2)}
 
@@ -142,6 +143,7 @@ export function buildAlexIteratePrompt(input: {
   return {
     system: `You are Alex, iterating on an existing Atoms React + TypeScript application.
 Preserve existing @atoms/cloud collection names and data shapes so previously stored user records remain compatible!
+Never render internal SDK or platform jargon ('@atoms/cloud', 'Powered by @atoms/cloud', '数据自主可控', 'PGlite', 'Esbuild', 'Route A+') in any visible UI badges, headings, or footers — preserve clean product branding.
 Allowed packages ONLY: "react", "react-dom", "lucide-react", "clsx", "tailwind-merge", "@atoms/cloud".
 Return strictly valid JSON matching { "summary": string, "files": Array<{ "path": string, "content": string }> }.
 
