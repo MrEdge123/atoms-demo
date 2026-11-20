@@ -33,6 +33,23 @@ function extractJsonObjectText(raw: string): string {
   return cleaned;
 }
 
+function createStreamAbort(timeoutMs: number) {
+  const controller = new AbortController();
+  const timer = setTimeout(
+    () => controller.abort(new Error(`LLM request timed out after ${timeoutMs}ms`)),
+    timeoutMs
+  );
+  return {
+    signal: controller.signal,
+    cleanup(completed: boolean) {
+      clearTimeout(timer);
+      if (!completed && !controller.signal.aborted) {
+        controller.abort(new Error('LLM stream aborted early'));
+      }
+    },
+  };
+}
+
 function parseModelList(raw: string | undefined, fallback: string[]): string[] {
   const items = (raw ?? '')
     .split(',')
@@ -194,6 +211,7 @@ export class VercelAISDKProvider implements LLMProvider {
   }
 
   private resolveEntry(modelId?: string): {
+    resolvedModelId: string;
     provider: string;
     temperature: number;
     maxTokens: number;
@@ -202,6 +220,7 @@ export class VercelAISDKProvider implements LLMProvider {
     if (modelId && this.registry.has(modelId)) {
       const entry = this.registry.get(modelId)!;
       return {
+        resolvedModelId: modelId,
         provider: entry.provider,
         temperature: entry.temperature,
         maxTokens: entry.maxTokens,
@@ -211,6 +230,7 @@ export class VercelAISDKProvider implements LLMProvider {
     if (this.defaultModelId && this.registry.has(this.defaultModelId)) {
       const entry = this.registry.get(this.defaultModelId)!;
       return {
+        resolvedModelId: this.defaultModelId,
         provider: entry.provider,
         temperature: entry.temperature,
         maxTokens: entry.maxTokens,
@@ -228,12 +248,15 @@ export class VercelAISDKProvider implements LLMProvider {
     schema: SchemaLike<T>;
     model?: string;
   }): Promise<T> {
-    const { provider, temperature, maxTokens, model } = this.resolveEntry(
-      input.model
-    );
+    const { resolvedModelId, provider, temperature, maxTokens, model } =
+      this.resolveEntry(input.model);
     const zodSchema = input.schema as unknown as ZodType<T>;
+    const started = Date.now();
+    console.log(`[LLM] start provider=${provider} model=${resolvedModelId}`);
 
     try {
+      const primaryAbort = createStreamAbort(120_000);
+      let primaryCompleted = false;
       const res =
         provider === 'anthropic'
           ? streamObject({
@@ -243,7 +266,8 @@ export class VercelAISDKProvider implements LLMProvider {
               schema: zodSchema,
               maxTokens,
               maxRetries: 0,
-              abortSignal: AbortSignal.timeout(150_000),
+              abortSignal: primaryAbort.signal,
+              onError: () => {},
             })
           : streamObject({
               model,
@@ -254,17 +278,60 @@ export class VercelAISDKProvider implements LLMProvider {
               temperature,
               maxTokens,
               maxRetries: 0,
-              abortSignal: AbortSignal.timeout(150_000),
+              abortSignal: primaryAbort.signal,
+              onError: () => {},
             });
-      return await res.object;
+
+      // Vercel AI SDK v4 streamObject is pull-based; fullStream also surfaces transport/API errors
+      // whereas textStream drops error chunks and leaves res.object hanging indefinitely.
+      const reader = res.fullStream.getReader();
+      let chunks = 0;
+      let sawFinish = false;
+      try {
+        while (true) {
+          const { done, value: part } = await reader.read();
+          if (done) break;
+          if (part.type === 'error') {
+            throw part.error instanceof Error
+              ? part.error
+              : new Error(String(part.error));
+          }
+          if (part.type === 'text-delta') {
+            chunks += 1;
+          } else if (part.type === 'finish') {
+            sawFinish = true;
+          }
+        }
+        if (!sawFinish) {
+          throw new Error('streamObject ended without finish event');
+        }
+        const obj = await res.object;
+        primaryCompleted = true;
+        console.log(
+          `[LLM] ok provider=${provider} model=${resolvedModelId} mode=streamObject elapsed=${Date.now() - started}ms chunks=${chunks}`
+        );
+        return obj;
+      } finally {
+        primaryAbort.cleanup(primaryCompleted);
+        if (!primaryCompleted) {
+          await reader.cancel().catch(() => undefined);
+        }
+        try {
+          reader.releaseLock();
+        } catch {
+          // Reader lock already released
+        }
+      }
     } catch (primaryErr) {
       const primaryMsg =
         primaryErr instanceof Error ? primaryErr.message : String(primaryErr);
       console.warn(
-        `[VercelAISDKProvider] streamObject primary failed for "${provider}" (${input.model || this.defaultModelId}): ${primaryMsg}; trying streamText JSON fallback`
+        `[LLM] warn provider=${provider} model=${resolvedModelId} mode=streamObject failed (${Date.now() - started}ms): ${primaryMsg}; trying streamText JSON fallback`
       );
       // Resilient streaming fallback for domestic gateways that emit markdown fences
       // or occasionally fail strict schema validation mid-stream.
+      const fallbackAbort = createStreamAbort(60_000);
+      let fallbackCompleted = false;
       const fallback = streamText({
         model,
         system: `${input.system}\n\nIMPORTANT: Return ONLY a valid raw JSON object that conforms strictly to the requested structure. Do not include markdown fences or any prose outside JSON.`,
@@ -272,26 +339,55 @@ export class VercelAISDKProvider implements LLMProvider {
         temperature,
         maxTokens,
         maxRetries: 0,
-        abortSignal: AbortSignal.timeout(120_000),
+        abortSignal: fallbackAbort.signal,
+        onError: () => {},
       });
 
-      const [fallbackText, finishReason] = await Promise.all([
-        fallback.text,
-        fallback.finishReason,
-      ]);
-      const jsonText = extractJsonObjectText(fallbackText);
+      const reader = fallback.fullStream.getReader();
+      let fallbackText = '';
+      let finishReason = 'unknown';
       try {
+        while (true) {
+          const { done, value: part } = await reader.read();
+          if (done) break;
+          if (part.type === 'error') {
+            throw part.error instanceof Error
+              ? part.error
+              : new Error(String(part.error));
+          }
+          if (part.type === 'text-delta') {
+            fallbackText += part.textDelta;
+          } else if (part.type === 'finish') {
+            finishReason = part.finishReason;
+          }
+        }
+        const jsonText = extractJsonObjectText(fallbackText);
         const parsed = JSON.parse(jsonText);
-        return zodSchema.parse(parsed);
+        const validated = zodSchema.parse(parsed);
+        fallbackCompleted = true;
+        console.log(
+          `[LLM] ok provider=${provider} model=${resolvedModelId} mode=streamText-fallback elapsed=${Date.now() - started}ms textLen=${fallbackText.length}`
+        );
+        return validated;
       } catch (fallbackErr) {
         const fallbackMsg =
           fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
         console.warn(
-          `[VercelAISDKProvider] streamText fallback failed for "${provider}": ${fallbackMsg} (finishReason=${finishReason}, textLen=${fallbackText.length})`
+          `[LLM] error provider=${provider} model=${resolvedModelId} mode=streamText-fallback failed (${Date.now() - started}ms): ${fallbackMsg} (finishReason=${finishReason}, textLen=${fallbackText.length})`
         );
         throw new Error(
           `Structured JSON generation failed for provider "${provider}": ${primaryMsg}`
         );
+      } finally {
+        fallbackAbort.cleanup(fallbackCompleted);
+        if (!fallbackCompleted) {
+          await reader.cancel().catch(() => undefined);
+        }
+        try {
+          reader.releaseLock();
+        } catch {
+          // Reader lock already released
+        }
       }
     }
   }
@@ -302,14 +398,42 @@ export class VercelAISDKProvider implements LLMProvider {
     model?: string;
   }): AsyncIterable<string> {
     const { provider, temperature, model } = this.resolveEntry(input.model);
+    const abort = createStreamAbort(120_000);
+    let completed = false;
     const res = streamText({
       model,
       system: input.system,
       prompt: input.prompt,
+      maxRetries: 0,
+      abortSignal: abort.signal,
+      onError: () => {},
       ...(provider === 'kimi' ? { temperature } : {}),
     });
-    for await (const chunk of res.textStream) {
-      yield chunk;
+    const reader = res.fullStream.getReader();
+    try {
+      while (true) {
+        const { done, value: part } = await reader.read();
+        if (done) break;
+        if (part.type === 'error') {
+          throw part.error instanceof Error
+            ? part.error
+            : new Error(String(part.error));
+        }
+        if (part.type === 'text-delta') {
+          yield part.textDelta;
+        }
+      }
+      completed = true;
+    } finally {
+      abort.cleanup(completed);
+      if (!completed) {
+        await reader.cancel().catch(() => undefined);
+      }
+      try {
+        reader.releaseLock();
+      } catch {
+        // Reader lock already released
+      }
     }
   }
 }

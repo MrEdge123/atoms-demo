@@ -36,6 +36,7 @@ export function createSseResponse(
   const encoder = new TextEncoder();
   let heartbeat: ReturnType<typeof setInterval> | null = null;
   let closed = false;
+  const iterator = iterable[Symbol.asyncIterator]();
 
   const stopHeartbeat = () => {
     closed = true;
@@ -56,9 +57,14 @@ export function createSseResponse(
         }
       }, 15000);
 
+      let completed = false;
       try {
-        for await (const event of iterable) {
-          if (closed) break;
+        while (!closed) {
+          const { done, value: event } = await iterator.next();
+          if (done || closed) {
+            if (done) completed = true;
+            break;
+          }
           controller.enqueue(
             encoder.encode(`data: ${JSON.stringify(event)}\n\n`)
           );
@@ -73,12 +79,19 @@ export function createSseResponse(
             payload: { message },
             timestamp: new Date().toISOString(),
           };
-          controller.enqueue(
-            encoder.encode(`data: ${JSON.stringify(errorEvent)}\n\n`)
-          );
+          try {
+            controller.enqueue(
+              encoder.encode(`data: ${JSON.stringify(errorEvent)}\n\n`)
+            );
+          } catch {
+            // Stream closed concurrently before error event could be enqueued
+          }
         }
       } finally {
         stopHeartbeat();
+        if (!completed) {
+          await iterator.return?.().catch(() => undefined);
+        }
         try {
           controller.close();
         } catch {
@@ -88,6 +101,7 @@ export function createSseResponse(
     },
     cancel() {
       stopHeartbeat();
+      void iterator.return?.().catch(() => undefined);
     },
   });
 

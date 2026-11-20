@@ -103,6 +103,12 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
     opts?: { model?: string }
   ): AsyncIterable<AgentEvent> {
     const project = await this.requireProject(projectId);
+    if (isPlanningInProgress(project)) {
+      throw new Error('Iris / Emma 正在分析需求并生成方案，请等待当前流程完成后再重新启动');
+    }
+    if (isBuildingInProgress(project)) {
+      throw new Error('Alex 正在构建中，请等待当前构建完成后再重新启动');
+    }
     const getSeq = await this.nextSeq(projectId);
 
     // Clear any stale unchosen Race Mode candidates without touching publishedHtml.
@@ -111,11 +117,15 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
     }
 
     // Phase 1: Iris market research
+    const started = Date.now();
+    const modelLabel = opts?.model || 'default';
+    console.log(`[Workflow] start begin project=${projectId} model=${modelLabel}`);
     await this.repo.saveDraft(projectId, project.draftFiles, 'researching');
     const fallbackStatus: Project['status'] =
       project.publishedVersion > 0 || Object.keys(project.draftFiles).length > 0
         ? 'ready'
         : 'error';
+    let completed = false;
     try {
       yield await this.emitAndPersist(projectId, getSeq, {
         role: 'iris',
@@ -129,6 +139,9 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
         schema: researchOutputSchema,
         model: opts?.model,
       });
+      console.log(
+        `[Workflow] iris ready project=${projectId} model=${modelLabel} elapsed=${Date.now() - started}ms`
+      );
 
       yield await this.emitAndPersist(projectId, getSeq, {
         role: 'iris',
@@ -161,6 +174,10 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
 
       await this.repo.updatePlan(projectId, normalizedPlan);
       await this.repo.saveDraft(projectId, project.draftFiles, 'awaiting_confirmation');
+      completed = true;
+      console.log(
+        `[Workflow] start done project=${projectId} status=awaiting_confirmation elapsed=${Date.now() - started}ms`
+      );
 
       yield await this.emitAndPersist(projectId, getSeq, {
         role: 'emma',
@@ -174,10 +191,20 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
         payload: { status: 'awaiting_confirmation' },
       });
     } catch (err) {
-      await this.repo
-        .saveDraft(projectId, project.draftFiles, fallbackStatus)
-        .catch(() => undefined);
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(
+        `[Workflow] start error project=${projectId} model=${modelLabel} elapsed=${Date.now() - started}ms: ${msg}`
+      );
       throw err;
+    } finally {
+      if (!completed) {
+        console.warn(
+          `[Workflow] start aborted project=${projectId} model=${modelLabel} restoring status=${fallbackStatus} elapsed=${Date.now() - started}ms`
+        );
+        await this.repo
+          .saveDraft(projectId, project.draftFiles, fallbackStatus)
+          .catch(() => undefined);
+      }
     }
   }
 
@@ -215,10 +242,15 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
     };
 
     await this.repo.updatePlan(projectId, mergedPlan);
-    await this.repo.saveDraft(projectId, project.draftFiles, 'building');
-
     const getSeq = await this.nextSeq(projectId);
     const mode = input?.mode ?? 'linear';
+    const started = Date.now();
+    const modelLabel = input?.model || 'default';
+    await this.repo.saveDraft(projectId, project.draftFiles, 'building');
+    let completed = false;
+    console.log(
+      `[Workflow] confirmPlan begin project=${projectId} mode=${mode} model=${modelLabel}`
+    );
 
     try {
       if (mode === 'race') {
@@ -277,15 +309,21 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
         }
 
         const branches = branchRuns.map((r) => r.branch);
-        await this.repo.saveRaceBranches(projectId, branches);
-
         const hasUsableBranch = branches.some(
           (b) => b.previewHtml !== null && b.errors.length === 0
         );
+        // Only persist candidate branches if at least one compiled cleanly;
+        // if both failed, keep raceBranches empty so the project can iterate/publish/retry cleanly.
+        await this.repo.saveRaceBranches(projectId, hasUsableBranch ? branches : []);
+
         const finalStatus = hasUsableBranch ? 'awaiting_branch_selection' : 'error';
         // Keep existing draftFiles (and any prior published version) strictly untouched
         // until the user explicitly chooses a candidate branch via selectBranch().
         await this.repo.saveDraft(projectId, project.draftFiles, finalStatus);
+        completed = true;
+        console.log(
+          `[Workflow] confirmPlan done project=${projectId} mode=race status=${finalStatus} elapsed=${Date.now() - started}ms`
+        );
 
         yield await this.emitAndPersist(projectId, getSeq, {
           role: 'system',
@@ -335,6 +373,10 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
       await this.repo.saveRaceBranches(projectId, []);
       const finalStatus = artifact.ok ? 'ready' : 'error';
       await this.repo.saveDraft(projectId, files, finalStatus);
+      completed = true;
+      console.log(
+        `[Workflow] confirmPlan done project=${projectId} mode=linear status=${finalStatus} elapsed=${Date.now() - started}ms`
+      );
 
       yield await this.emitAndPersist(projectId, getSeq, {
         role: 'system',
@@ -342,10 +384,20 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
         payload: { status: finalStatus, mode: 'linear' },
       });
     } catch (err) {
-      await this.repo
-        .saveDraft(projectId, project.draftFiles, 'error')
-        .catch(() => undefined);
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(
+        `[Workflow] confirmPlan error project=${projectId} mode=${mode} model=${modelLabel} elapsed=${Date.now() - started}ms: ${msg}`
+      );
       throw err;
+    } finally {
+      if (!completed) {
+        console.warn(
+          `[Workflow] confirmPlan aborted project=${projectId} mode=${mode} model=${modelLabel} elapsed=${Date.now() - started}ms`
+        );
+        await this.repo
+          .saveDraft(projectId, project.draftFiles, 'error')
+          .catch(() => undefined);
+      }
     }
   }
 
@@ -406,6 +458,10 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
 
     const getSeq = await this.nextSeq(projectId);
     await this.repo.saveDraft(projectId, project.draftFiles, 'building');
+    const started = Date.now();
+    const modelLabel = opts?.model || 'default';
+    let completed = false;
+    console.log(`[Workflow] iterate begin project=${projectId} model=${modelLabel}`);
 
     try {
       yield await this.emitAndPersist(projectId, getSeq, {
@@ -443,6 +499,10 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
       // Preserve publishedHtml untouched; only update draftFiles and status.
       const nextStatus = artifact.ok ? 'ready' : 'error';
       await this.repo.saveDraft(projectId, files, nextStatus);
+      completed = true;
+      console.log(
+        `[Workflow] iterate done project=${projectId} status=${nextStatus} elapsed=${Date.now() - started}ms`
+      );
 
       yield await this.emitAndPersist(projectId, getSeq, {
         role: 'system',
@@ -450,10 +510,20 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
         payload: { status: nextStatus },
       });
     } catch (err) {
-      await this.repo
-        .saveDraft(projectId, project.draftFiles, 'ready')
-        .catch(() => undefined);
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(
+        `[Workflow] iterate error project=${projectId} model=${modelLabel} elapsed=${Date.now() - started}ms: ${msg}`
+      );
       throw err;
+    } finally {
+      if (!completed) {
+        console.warn(
+          `[Workflow] iterate aborted project=${projectId} model=${modelLabel} elapsed=${Date.now() - started}ms`
+        );
+        await this.repo
+          .saveDraft(projectId, project.draftFiles, 'ready')
+          .catch(() => undefined);
+      }
     }
   }
 
@@ -466,6 +536,9 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
     if (Object.keys(project.draftFiles).length === 0) {
       throw new Error(`Project "${projectId}" has no generated files to publish`);
     }
+
+    const started = Date.now();
+    console.log(`[Workflow] publish begin project=${projectId} slug=${project.slug}`);
 
     const seoTitle = project.plan?.seo?.title ?? project.plan?.appName ?? project.title;
     const seoDesc =
@@ -504,6 +577,9 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
       type: 'published',
       payload: result,
     });
+    console.log(
+      `[Workflow] publish done project=${projectId} slug=${project.slug} version=${result.version} elapsed=${Date.now() - started}ms`
+    );
 
     return result;
   }
