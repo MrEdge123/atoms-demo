@@ -899,4 +899,233 @@ export default function App() {
       await c.close();
     }
   }, 20000);
+
+  it('enforces atomic branch selection, unthemed Race tokens, palette fidelity, WCAG contrast, theme migration, and editorial font stack', async () => {
+    const {
+      BUILTIN_STYLE_THEMES,
+      createUnthemedDesignSystem,
+      getRaceDirectionsForPlan,
+      isSameThemeContent,
+      migrateLegacyStyleTheme,
+      renderDesignMarkdown,
+      resolveBranchDesignSystem,
+    } = await import('@/core');
+
+    const c = await createContainer({
+      storageAdapter: 'memory',
+      llmAdapter: 'mock',
+      builderAdapter: 'esbuild',
+    });
+
+    try {
+      // 1. Title preservation & atomic concurrent branch selection
+      const projAtomic = await c.repo.create({
+        title: 'Initial Title',
+        slug: 'atomic-race-title',
+      });
+      await collect(
+        c.workflow.start(
+          projAtomic.id,
+          'Build an SaaS analytics workspace with race branches'
+        )
+      );
+      await collect(c.workflow.confirmPlan(projAtomic.id, { mode: 'race' }));
+      await c.repo.rename(projAtomic.id, 'Renamed Custom Title');
+
+      const raceResults = await Promise.allSettled([
+        c.workflow.selectBranch(projAtomic.id, 'branch-a'),
+        c.workflow.selectBranch(projAtomic.id, 'branch-b'),
+      ]);
+      const fulfilled = raceResults.filter((r) => r.status === 'fulfilled');
+      const rejected = raceResults.filter((r) => r.status === 'rejected');
+      expect(fulfilled).toHaveLength(1);
+      expect(rejected).toHaveLength(1);
+
+      const afterAtomic = await c.repo.getById(projAtomic.id);
+      expect(afterAtomic?.title).toBe('Renamed Custom Title');
+      expect(afterAtomic?.raceBranches).toHaveLength(0);
+      const adoptedMode = afterAtomic?.plan?.designSystem?.colorMode;
+      expect(adoptedMode === 'light' || adoptedMode === 'dark').toBe(true);
+      expect(afterAtomic?.draftFiles['src/App.tsx']).toContain(
+        `data-color-mode="${adoptedMode}"`
+      );
+
+      // 2. Unthemed Race branch A consistency & neutral contrast branch B tone
+      const unthemedDs = createUnthemedDesignSystem('B');
+      const bespokePlan = {
+        appName: 'Bespoke Canvas',
+        summary: 'Scenario B plan with custom warm background',
+        targetUsers: 'product teams',
+        capabilities: ['db' as const],
+        collections: [
+          { name: 'items', fields: ['title'], description: 'Main records' },
+        ],
+        pages: [{ name: 'home', purpose: 'Overview dashboard' }],
+        designSystem: {
+          ...unthemedDs,
+          palette: {
+            ...unthemedDs.palette,
+            background: '#FAF8F4',
+          },
+        },
+      };
+      const bespokeDirs = getRaceDirectionsForPlan(bespokePlan);
+      const resolvedBespokeA = resolveBranchDesignSystem(
+        bespokePlan,
+        bespokeDirs[0]!
+      );
+      expect(bespokeDirs[0]?.palette.background).toBe('#FAF8F4');
+      expect(bespokeDirs[0]?.styleDirection).toContain('#FAF8F4');
+      expect(resolvedBespokeA.palette.background).toBe('#FAF8F4');
+
+      const obsidianTheme = BUILTIN_STYLE_THEMES.find(
+        (t) => t.id === 'preset-obsidian-tech'
+      )!;
+      const obsPlan = {
+        ...bespokePlan,
+        appName: 'Obsidian Contrast Check',
+        designSystem: {
+          ...createUnthemedDesignSystem('G'),
+          colorMode: obsidianTheme.colorMode,
+          palette: obsidianTheme.palette,
+          tone: '深空 #0A0B10 光学玻璃暗色风格',
+          themeId: obsidianTheme.id,
+          themeName: obsidianTheme.name,
+          customStylePrompt: obsidianTheme.stylePrompt,
+        },
+      };
+      const obsDirs = getRaceDirectionsForPlan(obsPlan);
+      const resolvedObsB = resolveBranchDesignSystem(obsPlan, obsDirs[1]!);
+      const mdObsB = renderDesignMarkdown({
+        ...obsPlan,
+        designSystem: resolvedObsB,
+      });
+      expect(resolvedObsB.colorMode).toBe('light');
+      expect(resolvedObsB.palette.background).toBe('#F8F9FB');
+      expect(resolvedObsB.tone).not.toContain('#0A0B10');
+      expect(resolvedObsB.layoutBlueprint).not.toContain('#0A0B10');
+      expect(mdObsB).not.toContain('#0A0B10');
+
+      // 3. Precision SaaS accent + Obsidian deep-blue edit + WCAG button text contrast
+      const saasTheme = BUILTIN_STYLE_THEMES.find(
+        (t) => t.id === 'preset-saas-precision'
+      )!;
+      const projSaas = await c.repo.create({
+        title: 'Precision SaaS App',
+        slug: 'precision-saas-palette',
+      });
+      await collect(
+        c.workflow.start(projSaas.id, 'Build a precision B2B analytics workspace', {
+          styleTheme: saasTheme,
+        })
+      );
+      await collect(c.workflow.confirmPlan(projSaas.id, { mode: 'linear' }));
+      const saasDone = await c.repo.getById(projSaas.id);
+      const saasApp = saasDone?.draftFiles['src/App.tsx'] ?? '';
+      expect(saasApp).toContain('bg-[#F7F7F5]');
+      expect(saasApp).toContain('bg-[#2554D7]');
+      expect(saasApp).toContain('text-white');
+      expect(saasApp).not.toContain('bg-indigo-600');
+
+      const projObs = await c.repo.create({
+        title: 'Obsidian Accent Edit',
+        slug: 'obsidian-accent-edit',
+      });
+      await collect(
+        c.workflow.start(projObs.id, 'Build an AI inference telemetry dashboard', {
+          styleTheme: obsidianTheme,
+        })
+      );
+      await collect(c.workflow.confirmPlan(projObs.id, { mode: 'linear' }));
+      const obsInitial = await c.repo.getById(projObs.id);
+      const obsInitialApp = obsInitial?.draftFiles['src/App.tsx'] ?? '';
+      expect(obsInitialApp).toContain('bg-[#0A0B10]');
+      expect(obsInitialApp).toContain('bg-[#5B8CFF]');
+      expect(obsInitialApp).toContain('text-[#0F1115]');
+
+      await collect(c.workflow.iterate(projObs.id, '把主色调改成深蓝色'));
+      const obsAfterDeepBlue = await c.repo.getById(projObs.id);
+      const obsIterApp = obsAfterDeepBlue?.draftFiles['src/App.tsx'] ?? '';
+      expect(obsIterApp).toContain('bg-[#0A0B10]');
+      expect(obsIterApp).toContain('bg-blue-800');
+
+      // 4. Legacy CSS color migration & duplicate theme content detection
+      const legacyTheme = migrateLegacyStyleTheme({
+        id: 'legacy-1',
+        name: 'Legacy Theme',
+        description: 'Old saved theme using rgb/hsl/named colors',
+        scenario: 'D',
+        colorMode: 'light',
+        palette: {
+          background: 'rgb(255, 255, 255)',
+          surface: 'rgba(10, 11, 16, 1)',
+          textPrimary: 'hsl(210, 50%, 40%)',
+          textMuted: 'white',
+          accent: '#abc',
+        },
+        typography: {
+          headingStyle: 'editorial-serif',
+          bodyStyle: 'sans',
+        },
+        stylePrompt: 'Warm gallery layout with editorial typography',
+      });
+      expect(legacyTheme).not.toBeNull();
+      expect(legacyTheme?.palette.background).toBe('#FFFFFF');
+      expect(legacyTheme?.palette.surface).toBe('#0A0B10');
+      expect(legacyTheme?.palette.textPrimary).toBe('#336699');
+      expect(legacyTheme?.palette.textMuted).toBe('#FFFFFF');
+      expect(legacyTheme?.palette.accent).toBe('#AABBCC');
+
+      expect(
+        migrateLegacyStyleTheme({
+          ...legacyTheme!,
+          palette: { ...legacyTheme!.palette, accent: '#GGGGGG' },
+        })
+      ).toBeNull();
+
+      const sameDiffId = {
+        ...legacyTheme!,
+        id: 'other-id',
+        palette: { ...legacyTheme!.palette, background: '#ffffff' },
+      };
+      expect(isSameThemeContent(legacyTheme!, sameDiffId)).toBe(true);
+      expect(
+        isSameThemeContent(legacyTheme!, {
+          ...sameDiffId,
+          stylePrompt: 'Changed prompt',
+        })
+      ).toBe(false);
+
+      // 5. Standalone .font-editorial retains full serif font stack when font-serif is unused
+      const standaloneEditorialFiles = {
+        ...saasDone!.draftFiles,
+        'src/App.tsx': `import React from 'react';
+export default function App() {
+  return (
+    <main className="min-h-screen bg-[#FAF8F4] text-[#1D1916]">
+      <h1 className="font-editorial text-4xl">Editorial Headline Only</h1>
+    </main>
+  );
+}`,
+      };
+      const compiledStandalone = await c.builder.compile({
+        files: standaloneEditorialFiles,
+        projectId: projSaas.id,
+        apiBaseUrl: 'http://localhost:3000',
+        capabilities: [],
+        mode: 'preview',
+      });
+      expect(compiledStandalone.ok).toBe(true);
+      if (compiledStandalone.ok) {
+        const styleSection = compiledStandalone.html.slice(
+          compiledStandalone.html.indexOf('<style>'),
+          compiledStandalone.html.indexOf('</style>')
+        );
+        expect(styleSection).toContain('Playfair Display');
+        expect(styleSection).toContain('STZhongsong');
+      }
+    } finally {
+      await c.close();
+    }
+  }, 20000);
 });

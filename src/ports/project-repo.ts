@@ -1,5 +1,6 @@
 import type {
   AgentEvent,
+  DesignSystemSpec,
   ProductPlan,
   Project,
   ProjectStatus,
@@ -29,6 +30,15 @@ export interface ProjectRepository {
   ): Promise<void>;
 
   saveRaceBranches(id: string, branches: RaceBranch[]): Promise<void>;
+
+  adoptRaceBranch(
+    id: string,
+    input: {
+      branchId: string;
+      files: VirtualFS;
+      designSystem?: DesignSystemSpec;
+    }
+  ): Promise<Project | null>;
 
   savePublished(
     id: string,

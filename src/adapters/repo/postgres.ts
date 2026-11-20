@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import type {
   AgentEvent,
   CloudCapability,
+  DesignSystemSpec,
   ProductPlan,
   Project,
   ProjectStatus,
@@ -190,6 +191,46 @@ export class PostgresProjectRepository implements ProjectRepository {
        WHERE id = $1`,
       [id, JSON.stringify(branches), now]
     );
+  }
+
+  async adoptRaceBranch(
+    id: string,
+    input: {
+      branchId: string;
+      files: VirtualFS;
+      designSystem?: DesignSystemSpec;
+    }
+  ): Promise<Project | null> {
+    const now = new Date().toISOString();
+    const res = await this.sql.query<ProjectRow>(
+      `UPDATE projects
+       SET draft_files_json = $2::jsonb,
+           status = 'ready',
+           race_branches_json = '[]'::jsonb,
+           plan_json = CASE
+             WHEN $3::jsonb IS NOT NULL AND plan_json IS NOT NULL
+             THEN jsonb_set(plan_json, '{designSystem}', $3::jsonb, true)
+             ELSE plan_json
+           END,
+           updated_at = $4
+       WHERE id = $1
+         AND status NOT IN ('planning', 'awaiting_confirmation', 'building')
+         AND jsonb_typeof(race_branches_json) = 'array'
+         AND EXISTS (
+           SELECT 1
+           FROM jsonb_array_elements(race_branches_json) AS elem
+           WHERE elem->>'branchId' = $5
+         )
+       RETURNING *`,
+      [
+        id,
+        JSON.stringify(input.files),
+        input.designSystem ? JSON.stringify(input.designSystem) : null,
+        now,
+        input.branchId,
+      ]
+    );
+    return res.rows[0] ? mapProjectRow(res.rows[0]) : null;
   }
 
   async savePublished(

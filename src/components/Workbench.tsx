@@ -48,7 +48,8 @@ import {
   BUILTIN_STYLE_THEMES,
   DESIGN_SCENARIOS,
   applyThemeToDesignSystem,
-  styleThemeSchema,
+  isSameThemeContent,
+  migrateLegacyStyleTheme,
 } from '@/core';
 import {
   getMutationBlockReason,
@@ -229,6 +230,7 @@ export function Workbench() {
     projectId: string;
     ds: NonNullable<ProductPlan['designSystem']>;
   } | null>(null);
+  const unparseableCustomThemesRef = useRef<unknown[]>([]);
 
   useEffect(() => {
     activeIdRef.current = activeId;
@@ -245,17 +247,21 @@ export function Workbench() {
         ...BUILTIN_STYLE_THEMES.map((t) => t.id),
       ]);
       const valid: StyleThemeSpec[] = [];
+      const preservedInvalid: unknown[] = [];
       for (let i = 0; i < parsedJson.length; i += 1) {
-        const res = styleThemeSchema.safeParse(parsedJson[i]);
-        if (res.success) {
-          let id = res.data.id;
+        const migrated = migrateLegacyStyleTheme(parsedJson[i]);
+        if (migrated) {
+          let id = migrated.id;
           if (reservedIds.has(id)) {
             id = `custom-local-${Date.now().toString(36)}-${i}`;
           }
           reservedIds.add(id);
-          valid.push({ ...res.data, id, isCustom: true });
+          valid.push({ ...migrated, id, isCustom: true });
+        } else {
+          preservedInvalid.push(parsedJson[i]);
         }
       }
+      unparseableCustomThemesRef.current = preservedInvalid;
       setCustomThemes(valid);
     } catch {
       // Ignore invalid localStorage payload
@@ -278,7 +284,10 @@ export function Workbench() {
   function persistCustomThemes(next: StyleThemeSpec[]) {
     setCustomThemes(next);
     try {
-      window.localStorage.setItem(CUSTOM_THEMES_STORAGE_KEY, JSON.stringify(next));
+      window.localStorage.setItem(
+        CUSTOM_THEMES_STORAGE_KEY,
+        JSON.stringify([...next, ...unparseableCustomThemesRef.current])
+      );
     } catch {
       // Ignore storage quota errors
     }
@@ -311,20 +320,62 @@ export function Workbench() {
       ...BUILTIN_STYLE_THEMES.map((t) => t.id),
       ...customThemes.map((t) => t.id),
     ]);
+    const existingAndAccepted: StyleThemeSpec[] = [...customThemes];
     const accepted: StyleThemeSpec[] = [];
     imported.forEach((item, idx) => {
+      if (existingAndAccepted.some((existing) => isSameThemeContent(existing, item))) {
+        return;
+      }
       let safeId = item.id.trim();
       if (!safeId || usedIds.has(safeId)) {
         safeId = `custom-import-${Date.now().toString(36)}-${idx}`;
       }
       usedIds.add(safeId);
-      accepted.push({ ...item, id: safeId, isCustom: true });
+      const normalized: StyleThemeSpec = { ...item, id: safeId, isCustom: true };
+      accepted.push(normalized);
+      existingAndAccepted.push(normalized);
     });
-    persistCustomThemes([...accepted, ...customThemes]);
+    if (accepted.length > 0) {
+      persistCustomThemes([...accepted, ...customThemes]);
+    }
   }
 
   function handleApplyThemeSelection(theme: StyleThemeSpec | null) {
     if (themeModalMode === 'emma' && editablePlan) {
+      if (!theme) {
+        if (!editablePlan.designSystem?.themeId) {
+          return;
+        }
+        const baseline =
+          activeId && planBaselineDsRef.current?.projectId === activeId
+            ? planBaselineDsRef.current.ds
+            : null;
+        setEditablePlan({
+          ...editablePlan,
+          designSystem: applyThemeToDesignSystem(
+            editablePlan.designSystem,
+            null,
+            baseline
+          ),
+        });
+        return;
+      }
+
+      if (
+        activeId &&
+        editablePlan.designSystem &&
+        !editablePlan.designSystem.themeId
+      ) {
+        planBaselineDsRef.current = {
+          projectId: activeId,
+          ds: {
+            ...editablePlan.designSystem,
+            palette: { ...editablePlan.designSystem.palette },
+            typography: { ...editablePlan.designSystem.typography },
+            antiPatterns: [...editablePlan.designSystem.antiPatterns],
+          },
+        };
+      }
       const baseline =
         activeId && planBaselineDsRef.current?.projectId === activeId
           ? planBaselineDsRef.current.ds
@@ -392,6 +443,8 @@ export function Workbench() {
           projectId: data.project.id,
           ds: data.project.plan.designSystem,
         };
+      } else if (planBaselineDsRef.current?.projectId !== data.project.id) {
+        planBaselineDsRef.current = null;
       }
       if (!hasAcceptedSnapshotRef.current) {
         hasAcceptedSnapshotRef.current = true;

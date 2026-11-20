@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import type {
   AgentEvent,
+  DesignSystemSpec,
   ProductPlan,
   Project,
   ProjectStatus,
@@ -96,6 +97,41 @@ export class MemoryProjectRepository implements ProjectRepository {
     const project = this.require(id);
     project.raceBranches = structuredClone(branches);
     project.updatedAt = new Date().toISOString();
+  }
+
+  async adoptRaceBranch(
+    id: string,
+    input: {
+      branchId: string;
+      files: VirtualFS;
+      designSystem?: DesignSystemSpec;
+    }
+  ): Promise<Project | null> {
+    const project = this.projects.get(id);
+    if (!project) return null;
+    if (
+      project.status === 'planning' ||
+      project.status === 'awaiting_confirmation' ||
+      project.status === 'building'
+    ) {
+      return null;
+    }
+    const exists = project.raceBranches.some(
+      (b) => b.branchId === input.branchId
+    );
+    if (!exists) return null;
+
+    project.draftFiles = { ...input.files };
+    project.status = 'ready';
+    project.raceBranches = [];
+    if (input.designSystem && project.plan) {
+      project.plan = structuredClone({
+        ...project.plan,
+        designSystem: input.designSystem,
+      });
+    }
+    project.updatedAt = new Date().toISOString();
+    return structuredClone(project);
   }
 
   async savePublished(

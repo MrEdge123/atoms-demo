@@ -122,6 +122,38 @@ function inferDomainTemplate(ideaText: string): {
   };
 }
 
+function pickReadableButtonTextClass(
+  hex: string
+): 'text-white' | 'text-[#0F1115]' {
+  const cleaned = hex.trim().replace(/^#/, '');
+  const normalized =
+    cleaned.length === 3
+      ? cleaned
+          .split('')
+          .map((ch) => `${ch}${ch}`)
+          .join('')
+      : cleaned.length === 6 || cleaned.length === 8
+        ? cleaned.slice(0, 6)
+        : null;
+  if (!normalized || !/^[0-9a-fA-F]{6}$/.test(normalized)) {
+    return 'text-white';
+  }
+  const linearize = (c: number) =>
+    c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  const r = Number.parseInt(normalized.slice(0, 2), 16) / 255;
+  const g = Number.parseInt(normalized.slice(2, 4), 16) / 255;
+  const b = Number.parseInt(normalized.slice(4, 6), 16) / 255;
+  const lum =
+    0.2126 * linearize(r) + 0.7152 * linearize(g) + 0.0722 * linearize(b);
+  const whiteContrast = 1.05 / (lum + 0.05);
+  const darkLum =
+    0.2126 * linearize(0x0f / 255) +
+    0.7152 * linearize(0x11 / 255) +
+    0.0722 * linearize(0x15 / 255);
+  const darkContrast = (lum + 0.05) / (darkLum + 0.05);
+  return whiteContrast >= darkContrast ? 'text-white' : 'text-[#0F1115]';
+}
+
 function buildMockReactFiles(opts: {
   appName: string;
   summary: string;
@@ -145,47 +177,37 @@ function buildMockReactFiles(opts: {
   const customMuted = opts.palette?.textMuted;
   const customAccent = opts.palette?.accent;
 
-  const useLegacyDark = opts.darkTheme && (!customBg || customBg.toLowerCase() === '#020617');
-  const useLegacyLight = !opts.darkTheme && (!customBg || customBg.toLowerCase() === '#f7f7f5');
+  const bgClass = customBg
+    ? opts.darkTheme && customBg.toLowerCase() === '#020617'
+      ? `min-h-screen bg-slate-950 text-[${customText ?? '#F1F5F9'}]`
+      : `min-h-screen bg-[${customBg}] text-[${customText ?? (opts.darkTheme ? '#F3F4F6' : '#141413')}]`
+    : opts.darkTheme
+      ? 'min-h-screen bg-slate-950 text-slate-100'
+      : 'min-h-screen bg-slate-50 text-slate-900';
 
-  const bgClass = useLegacyDark
-    ? 'min-h-screen bg-slate-950 text-slate-100'
-    : useLegacyLight
-      ? 'min-h-screen bg-slate-50 text-slate-900'
-      : customBg
-        ? `min-h-screen bg-[${customBg}] text-[${customText ?? (opts.darkTheme ? '#F3F4F6' : '#141413')}]`
-        : opts.darkTheme
-          ? 'min-h-screen bg-slate-950 text-slate-100'
-          : 'min-h-screen bg-slate-50 text-slate-900';
-
-  const cardClass = useLegacyDark
-    ? 'rounded-2xl border border-slate-800 bg-slate-900/90 shadow-lg'
-    : useLegacyLight
-      ? 'rounded-2xl border border-slate-200 bg-white shadow-sm'
-      : customSurface
-        ? opts.darkTheme
-          ? `rounded-2xl border border-[rgba(255,255,255,0.08)] bg-[${customSurface}]`
-          : `rounded-2xl border border-[rgba(12,12,12,0.08)] bg-[${customSurface}]`
-        : opts.darkTheme
-          ? 'rounded-2xl border border-slate-800 bg-slate-900/90 shadow-lg'
-          : 'rounded-2xl border border-slate-200 bg-white shadow-sm';
+  const cardClass = customSurface
+    ? opts.darkTheme
+      ? `rounded-2xl border border-[rgba(255,255,255,0.08)] bg-[${customSurface}]`
+      : `rounded-2xl border border-[rgba(12,12,12,0.08)] bg-[${customSurface}]`
+    : opts.darkTheme
+      ? 'rounded-2xl border border-slate-800 bg-slate-900/90 shadow-lg'
+      : 'rounded-2xl border border-slate-200 bg-white shadow-sm';
 
   const inputClass = opts.darkTheme
     ? 'w-full rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-2.5 text-sm text-slate-100 placeholder-slate-500 focus:border-cyan-400 focus:outline-none'
     : 'w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900 placeholder-slate-400 focus:border-indigo-500 focus:bg-white focus:outline-none';
   const primaryBtn = opts.deepBlueAccent
     ? 'inline-flex items-center justify-center gap-1.5 rounded-xl bg-blue-800 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-900 transition disabled:opacity-50'
-    : customAccent && !useLegacyDark && !useLegacyLight
-      ? `inline-flex items-center justify-center gap-1.5 rounded-full bg-[${customAccent}] px-4 py-2.5 text-sm font-semibold text-white hover:opacity-90 transition disabled:opacity-50`
+    : customAccent
+      ? `inline-flex items-center justify-center gap-1.5 rounded-full bg-[${customAccent}] px-4 py-2.5 text-sm font-semibold ${pickReadableButtonTextClass(customAccent)} hover:opacity-90 transition disabled:opacity-50`
       : opts.darkTheme
         ? 'inline-flex items-center justify-center gap-1.5 rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-emerald-400 transition disabled:opacity-50'
         : 'inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-indigo-700 transition disabled:opacity-50';
-  const mutedText =
-    customMuted && !useLegacyDark && !useLegacyLight
-      ? `text-[${customMuted}]`
-      : opts.darkTheme
-        ? 'text-slate-400'
-        : 'text-slate-500';
+  const mutedText = customMuted
+    ? `text-[${customMuted}]`
+    : opts.darkTheme
+      ? 'text-slate-400'
+      : 'text-slate-500';
   const rowBorder = opts.darkTheme ? 'border-slate-800' : 'border-slate-100';
   const headingFontClass =
     opts.headingStyle === 'editorial-serif' ? 'font-editorial ' : '';
@@ -850,7 +872,6 @@ export class MockLLMProvider implements LLMProvider {
     }
 
     const effectivePalette =
-      !deepBlueAccent &&
       plan?.designSystem &&
       (plan.designSystem.colorMode === 'dark') === darkTheme
         ? plan.designSystem.palette

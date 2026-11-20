@@ -523,9 +523,9 @@ export function getRaceDirectionsForPlan(
   const scenarioDef = getScenarioDefinition(ds?.scenario);
   const [dirA, dirB] = scenarioDef.raceDirections;
 
-  if (ds?.themeName || ds?.customStylePrompt) {
+  if (ds) {
     const themeDetail = [
-      ds.themeName ? `Theme "${ds.themeName}"` : null,
+      ds.themeName ? `Theme "${ds.themeName}"` : `Scenario ${scenarioDef.id} confirmed plan`,
       `Palette bg=${ds.palette.background} surface=${ds.palette.surface} text=${ds.palette.textPrimary} accent=${ds.palette.accent}`,
       ds.customStylePrompt ? `User directive: ${ds.customStylePrompt}` : null,
     ]
@@ -536,8 +536,8 @@ export function getRaceDirectionsForPlan(
     return [
       {
         branchId: 'branch-a',
-        label: `方案 A · ${ds.themeName || '已选主题标准实现'}`,
-        styleDirection: `Follow the confirmed DesignSystemSpec & user theme strictly: ${themeDetail}.`,
+        label: ds.themeName ? `方案 A · ${ds.themeName}` : '方案 A · 确认方案标准实现',
+        styleDirection: `Follow the confirmed DesignSystemSpec strictly: ${themeDetail}.`,
         colorMode: ds.colorMode,
         palette: { ...ds.palette },
         surfaceDepth:
@@ -570,7 +570,9 @@ export function resolveBranchDesignSystem(
   if (
     dir.branchId === 'branch-a' &&
     baseDs &&
-    (baseDs.themeName || baseDs.customStylePrompt || baseDs.colorMode === dir.colorMode)
+    dir.colorMode === baseDs.colorMode &&
+    dir.palette.background.toLowerCase() === baseDs.palette.background.toLowerCase() &&
+    dir.palette.accent.toLowerCase() === baseDs.palette.accent.toLowerCase()
   ) {
     return {
       ...baseDs,
@@ -580,10 +582,19 @@ export function resolveBranchDesignSystem(
     };
   }
 
+  const branchShortLabel = dir.label
+    .replace(/^方案\s*[AB]\s*·\s*/, '')
+    .replace(/（同场景对比）$/, '');
+  const branchTone = `${branchShortLabel}（${dir.colorMode === 'dark' ? '深色沉浸' : '浅色明净'} · ${def.shortLabel}）`;
+  const contrastLayoutBlueprint =
+    dir.colorMode !== def.defaultColorMode
+      ? `${dir.colorMode === 'dark' ? '深色明度阶梯分层' : '浅色留白构图分层'}（主画布 ${dir.palette.background} → 卡片容器 ${dir.palette.surface}），${dir.surfaceDepth === 'stepped-dark' ? '使用 1px rgba(255,255,255,0.08) 半透明描边替代黑阴影' : '以 1px 柔和描边或极轻阴影建立清晰秩序'}，保持 40–60% 呼吸留白与单一视觉焦点。`
+      : def.layoutRules;
+
   return {
     scenario: def.id,
     scenarioName: baseDs?.scenarioName || def.name,
-    tone: baseDs?.tone || def.toneKeywords,
+    tone: branchTone,
     colorMode: dir.colorMode,
     palette: { ...dir.palette },
     typography: baseDs?.typography
@@ -591,15 +602,12 @@ export function resolveBranchDesignSystem(
       : { ...def.defaultTypography },
     radiusStyle: dir.radiusStyle ?? baseDs?.radiusStyle ?? def.defaultRadiusStyle,
     surfaceDepth: dir.surfaceDepth,
-    layoutBlueprint: baseDs?.layoutBlueprint || def.layoutRules,
+    layoutBlueprint: contrastLayoutBlueprint,
     visualFocalPoint:
       baseDs?.visualFocalPoint || '首屏单一核心视觉焦点与 40–60% 呼吸留白构图',
     motionStyle: baseDs?.motionStyle || def.motionRules,
     mediaStrategy: baseDs?.mediaStrategy || def.mediaRule,
-    antiPatterns:
-      baseDs?.antiPatterns && baseDs.antiPatterns.length > 0
-        ? [...baseDs.antiPatterns]
-        : [...def.antiPatterns],
+    antiPatterns: [...def.antiPatterns],
   };
 }
 
@@ -681,7 +689,7 @@ export function renderDesignMarkdown(
     '## Shared Patterns & States',
     `- **动效纪律**：${ds?.motionStyle || def.motionRules}（所有过渡 200–500ms cubic-bezier(0.22,1,0.36,1)，禁止线性动画与阻塞首屏，内置 prefers-reduced-motion 降级）。`,
     '- **表单与按钮状态**：清晰可见的 hover / active / disabled / loading 提交中状态与明确错误提示；移动端点击目标高度 ≥44px；对比度 ≥4.5:1（正文）/ 3:1（大标题）。',
-    '- **响应式安全**：<768px 移动端单列排布、导航精简不挤压，严禁横向滚动溢出（overflow-x: hidden）。',
+    '- **响应式安全**：<768px 移动端单列排布、导航精简不挤压，顶部导航栏品牌名与菜单项须加 whitespace-nowrap shrink-0（严禁 390px 窄屏折成两行），严禁横向滚动溢出（overflow-x: clip）。',
     '',
     '## Media',
     `- ${ds?.mediaStrategy || def.mediaRule}`
@@ -757,7 +765,7 @@ UNIVERSAL PRECISION & CSS CAPABILITIES IN OUR BUILDER:
    - Spacing only 4/8px multiples (p-4/6/8, gap-4/6/8, py-12/16/24); <=2 border radius styles.
    - Accent <10% of screen; zero colored text gradients; contrast >=4.5:1.
    - Transitions 200–500ms ease-[cubic-bezier(0.22,1,0.36,1)], never block typing or clicking.
-   - Responsive mobile-first (>=44px button/input tap height on mobile, zero horizontal overflow on 390px viewport).`;
+   - Responsive mobile-first (>=44px button/input tap height on mobile, zero horizontal overflow on 390px viewport, and top navbar brand/links MUST use whitespace-nowrap shrink-0 with compact padding/gap so labels never wrap to 2 lines on 390px).`;
 }
 
 export function getAlexIterateDesignGuardrail(plan: ProductPlan): string {

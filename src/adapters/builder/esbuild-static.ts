@@ -17,6 +17,13 @@ const ALLOWED_PACKAGES = new Set([
   'tailwind-merge',
 ]);
 
+const FONT_SANS_STACK =
+  '"Inter", -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", ui-sans-serif, system-ui, sans-serif';
+const FONT_SERIF_STACK =
+  '"Source Han Serif SC", "Noto Serif SC", "Songti SC", "STZhongsong", "Playfair Display", Georgia, serif';
+const FONT_MONO_STACK =
+  '"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+
 type TailwindCompiler = Awaited<ReturnType<typeof compileTailwind>>;
 let cachedTailwindCompiler: Promise<TailwindCompiler> | null = null;
 
@@ -28,9 +35,9 @@ function getTailwindCompiler(): Promise<TailwindCompiler> {
       return compileTailwind(
         `@import "tailwindcss";
 @theme {
-  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", ui-sans-serif, system-ui, sans-serif;
-  --font-serif: "Source Han Serif SC", "Noto Serif SC", "Songti SC", "STZhongsong", "Playfair Display", Georgia, serif;
-  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --font-sans: ${FONT_SANS_STACK};
+  --font-serif: ${FONT_SERIF_STACK};
+  --font-mono: ${FONT_MONO_STACK};
 }`,
         {
           loadStylesheet: async (id, base) => {
@@ -97,15 +104,15 @@ const DESIGN_BASE_CSS = `
     margin: 0;
     overflow-x: clip;
     scroll-behavior: smooth;
-    font-family: var(--font-sans, "Inter", -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif);
+    font-family: var(--font-sans, ${FONT_SANS_STACK});
   }
 }
 @layer components {
   .font-editorial {
-    font-family: var(--font-serif, "Source Han Serif SC", "Noto Serif SC", "Songti SC", Georgia, serif);
+    font-family: var(--font-serif, ${FONT_SERIF_STACK});
   }
   .font-display {
-    font-family: var(--font-sans, "Inter", -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif);
+    font-family: var(--font-sans, ${FONT_SANS_STACK});
   }
   .tabular-nums {
     font-variant-numeric: tabular-nums;

@@ -227,4 +227,71 @@ describe('L2: Real PGlite persistence across container restarts and iterative re
       fs.rmSync(tempMulti, { recursive: true, force: true });
     }
   }, 25000);
+
+  it('atomically adopts Race branch via PostgresProjectRepository preserving renamed title and persisting designSystem across restart', async () => {
+    const { BUILTIN_STYLE_THEMES } = await import('@/core');
+    const tempRaceDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'atoms-l2-race-adopt-')
+    );
+    const raceDbDir = path.join(tempRaceDir, 'db');
+
+    try {
+      const c1 = await createContainer({
+        storageAdapter: 'pglite',
+        pgliteDataDir: raceDbDir,
+        builderAdapter: 'esbuild',
+        publisherAdapter: 'same-origin',
+        billingAdapter: 'mock',
+        apiBaseUrl: 'http://127.0.0.1:3000',
+        authSecret: 'l2-race-secret',
+      });
+
+      const obsidianTheme = BUILTIN_STYLE_THEMES.find(
+        (t) => t.id === 'preset-obsidian-tech'
+      )!;
+      const proj = await c1.repo.create({
+        title: 'Initial Race Title',
+        slug: 'pglite-atomic-race',
+      });
+      await drain(
+        c1.workflow.start(proj.id, 'Build a real-time AI telemetry studio', {
+          styleTheme: obsidianTheme,
+        })
+      );
+      await drain(c1.workflow.confirmPlan(proj.id, { mode: 'race' }));
+      await c1.repo.rename(proj.id, 'User Renamed Title');
+
+      const selected = await c1.workflow.selectBranch(proj.id, 'branch-b');
+      expect(selected.title).toBe('User Renamed Title');
+      expect(selected.plan?.designSystem?.colorMode).toBe('light');
+      expect(selected.plan?.designSystem?.palette.background).toBe('#F8F9FB');
+      expect(selected.raceBranches).toHaveLength(0);
+
+      await expect(
+        c1.workflow.selectBranch(proj.id, 'branch-a')
+      ).rejects.toThrow(/not found/);
+
+      await c1.close();
+
+      const c2 = await createContainer({
+        storageAdapter: 'pglite',
+        pgliteDataDir: raceDbDir,
+        builderAdapter: 'esbuild',
+        publisherAdapter: 'same-origin',
+        billingAdapter: 'mock',
+        apiBaseUrl: 'http://127.0.0.1:3000',
+        authSecret: 'l2-race-secret',
+      });
+
+      const reloaded = await c2.repo.getById(proj.id);
+      expect(reloaded?.title).toBe('User Renamed Title');
+      expect(reloaded?.plan?.designSystem?.colorMode).toBe('light');
+      expect(reloaded?.plan?.designSystem?.palette.background).toBe('#F8F9FB');
+      expect(reloaded?.raceBranches).toHaveLength(0);
+
+      await c2.close();
+    } finally {
+      fs.rmSync(tempRaceDir, { recursive: true, force: true });
+    }
+  }, 25000);
 });

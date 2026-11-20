@@ -539,14 +539,16 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
       );
     }
 
-    if (chosen.designSystem && project.plan) {
-      await this.repo.updatePlan(projectId, {
-        ...project.plan,
-        designSystem: chosen.designSystem,
-      });
+    const updated = await this.repo.adoptRaceBranch(projectId, {
+      branchId: chosen.branchId,
+      files: chosen.files,
+      designSystem: chosen.designSystem,
+    });
+    if (!updated) {
+      throw new Error(
+        `Race branch "${branchId}" is no longer available for selection on project "${projectId}"`
+      );
     }
-    await this.repo.saveDraft(projectId, chosen.files, 'ready');
-    await this.repo.saveRaceBranches(projectId, []);
 
     const getSeq = await this.nextSeq(projectId);
     await this.emitAndPersist(projectId, getSeq, {
@@ -558,10 +560,6 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
       },
     });
 
-    const updated = await this.repo.getById(projectId);
-    if (!updated) {
-      throw new Error(`Project "${projectId}" disappeared after branch selection`);
-    }
     return updated;
   }
 

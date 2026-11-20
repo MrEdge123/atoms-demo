@@ -12,7 +12,7 @@ import {
   X,
 } from 'lucide-react';
 import type { DesignScenarioId, StyleThemeSpec } from '@/domain';
-import { DESIGN_SCENARIOS, styleThemeSchema } from '@/core';
+import { DESIGN_SCENARIOS, migrateLegacyStyleTheme, styleThemeSchema } from '@/core';
 
 interface StyleThemeModalProps {
   open: boolean;
@@ -69,6 +69,11 @@ export function StyleThemeModal({
 
   const dialogRef = useRef<HTMLDivElement>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
+  const onCloseRef = useRef(onClose);
+
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
 
   useEffect(() => {
     if (!open) return;
@@ -86,7 +91,7 @@ export function StyleThemeModal({
     function handleKeyDown(e: KeyboardEvent) {
       if (e.key === 'Escape') {
         e.preventDefault();
-        onClose();
+        onCloseRef.current();
         return;
       }
       if (e.key !== 'Tab') return;
@@ -121,7 +126,7 @@ export function StyleThemeModal({
       document.removeEventListener('keydown', handleKeyDown);
       previousFocusRef.current?.focus?.();
     };
-  }, [open, onClose]);
+  }, [open]);
 
   const allPreviewColors = useMemo(
     () => [background, surface, textPrimary, textMuted, accent],
@@ -229,9 +234,9 @@ export function StyleThemeModal({
         }
         const valid: StyleThemeSpec[] = [];
         for (const item of raw) {
-          const parsed = styleThemeSchema.safeParse(item);
-          if (parsed.success) {
-            valid.push({ ...parsed.data, isCustom: true });
+          const migrated = migrateLegacyStyleTheme(item);
+          if (migrated) {
+            valid.push(migrated);
           }
         }
         if (valid.length === 0) {

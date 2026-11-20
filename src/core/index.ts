@@ -43,4 +43,7 @@ export {
   BUILTIN_STYLE_THEMES,
   applyThemeToDesignSystem,
   createUnthemedDesignSystem,
+  isSameThemeContent,
+  migrateLegacyStyleTheme,
+  normalizeCssColorToHex,
 } from './style-presets';
