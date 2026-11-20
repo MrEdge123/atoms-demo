@@ -89,7 +89,11 @@ function main() {
   if (!lines.some((l) => l.startsWith('KIMI_BASE_URL='))) {
     lines = upsertEnvVar(lines, 'KIMI_BASE_URL', 'https://api.moonshot.cn/v1');
   }
-  lines = upsertEnvVar(lines, 'KIMI_MODEL', 'kimi-k2.7-code-highspeed,kimi-k2.7-code');
+  lines = upsertEnvVar(
+    lines,
+    'KIMI_MODEL',
+    'kimi-k2.6,kimi-k3.1-pro-highspeed,kimi-k2.7-code-highspeed'
+  );
 
   fs.writeFileSync(ENV_LOCAL_PATH, `${lines.join('\n')}\n`, 'utf8');
   console.log('Synced API credentials to .env.local (masked):');

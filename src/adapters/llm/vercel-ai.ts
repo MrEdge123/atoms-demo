@@ -42,6 +42,28 @@ function parseModelList(raw: string | undefined, fallback: string[]): string[] {
   return Array.from(new Set(source));
 }
 
+function createNoThinkingFetch(): typeof fetch {
+  return (async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (init && typeof init.body === 'string') {
+      try {
+        const parsed = JSON.parse(init.body) as Record<string, unknown>;
+        parsed.thinking = { type: 'disabled' };
+        return fetch(input, { ...init, body: JSON.stringify(parsed) });
+      } catch {
+        // Forward non-JSON request bodies untouched
+      }
+    }
+    return fetch(input, init);
+  }) as typeof fetch;
+}
+
+interface RegisteredModelEntry {
+  provider: string;
+  temperature: number;
+  maxTokens: number;
+  create: () => LanguageModelV1;
+}
+
 /**
  * Multi-provider LLM adapter backed by Vercel AI SDK.
  * Exposes models whose API keys are configured in environment variables
@@ -49,10 +71,7 @@ function parseModelList(raw: string | undefined, fallback: string[]): string[] {
  */
 export class VercelAISDKProvider implements LLMProvider {
   private readonly models: ModelInfo[] = [];
-  private readonly registry = new Map<
-    string,
-    { provider: string; create: () => LanguageModelV1 }
-  >();
+  private readonly registry = new Map<string, RegisteredModelEntry>();
   private readonly defaultModelId: string | null = null;
 
   constructor(env: VercelAIEnvConfig) {
@@ -70,6 +89,8 @@ export class VercelAISDKProvider implements LLMProvider {
       });
       this.registry.set(`openai:${modelId}`, {
         provider: 'openai',
+        temperature: 0.2,
+        maxTokens: 16384,
         create: () => provider(modelId),
       });
       if (!this.defaultModelId) this.defaultModelId = `openai:${modelId}`;
@@ -88,6 +109,8 @@ export class VercelAISDKProvider implements LLMProvider {
       });
       this.registry.set(`anthropic:${modelId}`, {
         provider: 'anthropic',
+        temperature: 0.2,
+        maxTokens: 16384,
         create: () => provider(modelId),
       });
       if (!this.defaultModelId) this.defaultModelId = `anthropic:${modelId}`;
@@ -102,6 +125,7 @@ export class VercelAISDKProvider implements LLMProvider {
         apiKey: env.deepseekApiKey,
         baseURL: env.deepseekBaseUrl || 'https://api.deepseek.com/v1',
         compatibility: 'compatible',
+        fetch: createNoThinkingFetch(),
       });
       for (const modelId of modelIds) {
         this.models.push({
@@ -112,6 +136,8 @@ export class VercelAISDKProvider implements LLMProvider {
         });
         this.registry.set(`deepseek:${modelId}`, {
           provider: 'deepseek',
+          temperature: 0.2,
+          maxTokens: 16384,
           create: () => provider(modelId),
         });
         if (!this.defaultModelId) this.defaultModelId = `deepseek:${modelId}`;
@@ -120,15 +146,24 @@ export class VercelAISDKProvider implements LLMProvider {
 
     if (env.kimiApiKey) {
       const modelIds = parseModelList(env.kimiModel, [
+        'kimi-k2.6',
+        'kimi-k3.1-pro-highspeed',
         'kimi-k2.7-code-highspeed',
-        'kimi-k2.7-code',
       ]);
-      const provider = createOpenAI({
+      const kimiBaseUrl = env.kimiBaseUrl || 'https://api.moonshot.cn/v1';
+      const fastProvider = createOpenAI({
         apiKey: env.kimiApiKey,
-        baseURL: env.kimiBaseUrl || 'https://api.moonshot.cn/v1',
+        baseURL: kimiBaseUrl,
+        compatibility: 'compatible',
+        fetch: createNoThinkingFetch(),
+      });
+      const reasoningProvider = createOpenAI({
+        apiKey: env.kimiApiKey,
+        baseURL: kimiBaseUrl,
         compatibility: 'compatible',
       });
       for (const modelId of modelIds) {
+        const isK27 = modelId.includes('k2.7');
         this.models.push({
           id: `kimi:${modelId}`,
           label: `Kimi (${modelId})`,
@@ -137,7 +172,9 @@ export class VercelAISDKProvider implements LLMProvider {
         });
         this.registry.set(`kimi:${modelId}`, {
           provider: 'kimi',
-          create: () => provider(modelId),
+          temperature: isK27 ? 1 : 0.6,
+          maxTokens: isK27 ? 32768 : 16384,
+          create: () => (isK27 ? reasoningProvider : fastProvider)(modelId),
         });
         if (!this.defaultModelId) this.defaultModelId = `kimi:${modelId}`;
       }
@@ -158,15 +195,27 @@ export class VercelAISDKProvider implements LLMProvider {
 
   private resolveEntry(modelId?: string): {
     provider: string;
+    temperature: number;
+    maxTokens: number;
     model: LanguageModelV1;
   } {
     if (modelId && this.registry.has(modelId)) {
       const entry = this.registry.get(modelId)!;
-      return { provider: entry.provider, model: entry.create() };
+      return {
+        provider: entry.provider,
+        temperature: entry.temperature,
+        maxTokens: entry.maxTokens,
+        model: entry.create(),
+      };
     }
     if (this.defaultModelId && this.registry.has(this.defaultModelId)) {
       const entry = this.registry.get(this.defaultModelId)!;
-      return { provider: entry.provider, model: entry.create() };
+      return {
+        provider: entry.provider,
+        temperature: entry.temperature,
+        maxTokens: entry.maxTokens,
+        model: entry.create(),
+      };
     }
     throw new Error(
       'No real LLM API keys configured (OPENAI_API_KEY / ANTHROPIC_API_KEY / DEEPSEEK_API_KEY / KIMI_API_KEY)'
@@ -179,11 +228,10 @@ export class VercelAISDKProvider implements LLMProvider {
     schema: SchemaLike<T>;
     model?: string;
   }): Promise<T> {
-    const { provider, model } = this.resolveEntry(input.model);
+    const { provider, temperature, maxTokens, model } = this.resolveEntry(
+      input.model
+    );
     const zodSchema = input.schema as unknown as ZodType<T>;
-
-    const temperature = provider === 'kimi' ? 1 : 0.2;
-    const maxTokens = provider === 'kimi' ? 32768 : 8192;
 
     try {
       const res =
@@ -194,7 +242,7 @@ export class VercelAISDKProvider implements LLMProvider {
               prompt: input.prompt,
               schema: zodSchema,
               maxTokens,
-              abortSignal: AbortSignal.timeout(120_000),
+              abortSignal: AbortSignal.timeout(150_000),
             })
           : await generateObject({
               model,
@@ -204,7 +252,7 @@ export class VercelAISDKProvider implements LLMProvider {
               mode: 'json',
               temperature,
               maxTokens,
-              abortSignal: AbortSignal.timeout(120_000),
+              abortSignal: AbortSignal.timeout(150_000),
             });
       return res.object;
     } catch (primaryErr) {
@@ -246,12 +294,12 @@ export class VercelAISDKProvider implements LLMProvider {
     prompt: string;
     model?: string;
   }): AsyncIterable<string> {
-    const { provider, model } = this.resolveEntry(input.model);
+    const { provider, temperature, model } = this.resolveEntry(input.model);
     const res = streamText({
       model,
       system: input.system,
       prompt: input.prompt,
-      ...(provider === 'kimi' ? { temperature: 1 } : {}),
+      ...(provider === 'kimi' ? { temperature } : {}),
     });
     for await (const chunk of res.textStream) {
       yield chunk;
