@@ -136,6 +136,7 @@ export type ProjectStatus =
 export interface Project {
   id: string;
   slug: string;
+  ownerSid?: string | null;
   title: string;
   status: ProjectStatus;
   plan: ProductPlan | null;

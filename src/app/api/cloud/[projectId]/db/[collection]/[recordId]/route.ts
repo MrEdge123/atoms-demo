@@ -1,7 +1,24 @@
+import { CloudRecordForbiddenError } from '@/ports';
 import { getContainer } from '@/container';
-import { corsOptionsResponse, jsonWithCors } from '@/app/api/_utils';
+import { isPublicCollection } from '@/app/api/_security';
+import {
+  corsOptionsResponse,
+  extractBearerToken,
+  jsonWithCors,
+} from '@/app/api/_utils';
 
 export const dynamic = 'force-dynamic';
+
+function mapRecordErrorStatus(err: unknown): { message: string; status: number } {
+  if (err instanceof CloudRecordForbiddenError) {
+    return { message: err.message, status: 403 };
+  }
+  const message = err instanceof Error ? err.message : String(err);
+  return {
+    message,
+    status: message.toLowerCase().includes('not found') ? 404 : 400,
+  };
+}
 
 export function OPTIONS() {
   return corsOptionsResponse();
@@ -14,6 +31,14 @@ export async function PATCH(
   }
 ) {
   const { projectId, collection, recordId } = await context.params;
+  const token = extractBearerToken(req);
+  if (!token) {
+    return jsonWithCors(
+      { error: 'Authentication required to modify records' },
+      { status: 401 }
+    );
+  }
+
   const body = (await req.json().catch(() => ({}))) as {
     patch?: Record<string, unknown>;
   };
@@ -27,32 +52,57 @@ export async function PATCH(
 
   try {
     const c = await getContainer();
+    const user = await c.appCloud.auth.verifyToken(projectId, token);
+    if (!user) {
+      return jsonWithCors({ error: 'Invalid session token' }, { status: 401 });
+    }
+
     const record = await c.appCloud.db.update(
       projectId,
       collection,
       recordId,
-      body.patch
+      body.patch,
+      {
+        expectedOwnerUserId: user.id,
+        allowUnownedPublic: isPublicCollection(collection),
+      }
     );
     return jsonWithCors({ record });
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return jsonWithCors({ error: message }, { status: 404 });
+    const mapped = mapRecordErrorStatus(err);
+    return jsonWithCors({ error: mapped.message }, { status: mapped.status });
   }
 }
 
 export async function DELETE(
-  _req: Request,
+  req: Request,
   context: {
     params: Promise<{ projectId: string; collection: string; recordId: string }>;
   }
 ) {
   const { projectId, collection, recordId } = await context.params;
+  const token = extractBearerToken(req);
+  if (!token) {
+    return jsonWithCors(
+      { error: 'Authentication required to delete records' },
+      { status: 401 }
+    );
+  }
+
   try {
     const c = await getContainer();
-    await c.appCloud.db.remove(projectId, collection, recordId);
+    const user = await c.appCloud.auth.verifyToken(projectId, token);
+    if (!user) {
+      return jsonWithCors({ error: 'Invalid session token' }, { status: 401 });
+    }
+
+    await c.appCloud.db.remove(projectId, collection, recordId, {
+      expectedOwnerUserId: user.id,
+      allowUnownedPublic: isPublicCollection(collection),
+    });
     return jsonWithCors({ ok: true });
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return jsonWithCors({ error: message }, { status: 404 });
+    const mapped = mapRecordErrorStatus(err);
+    return jsonWithCors({ error: mapped.message }, { status: mapped.status });
   }
 }

@@ -14,8 +14,13 @@ import {
 } from '@/adapters/app-cloud/billing';
 import { signHmacSha256 } from '@/adapters/app-cloud/crypto';
 import { EsbuildStaticBuilder } from '@/adapters/builder/esbuild-static';
+import { SameOriginSitePublisher } from '@/adapters/publisher/same-origin';
+import { MemoryProjectRepository } from '@/adapters/repo/memory';
+import { createSseResponse } from '@/app/api/_utils';
+import { AtomsWorkflowEngine } from '@/core/workflow';
 import { createContainer } from '@/container';
 import type { AgentEvent } from '@/domain';
+import type { LLMProvider } from '@/ports';
 
 async function collect(iter: AsyncIterable<AgentEvent>): Promise<AgentEvent[]> {
   const out: AgentEvent[] = [];
@@ -1311,4 +1316,86 @@ export default function App() {
       await c.close();
     }
   }, 20000);
+
+  it('cancels in-flight LLM call via AbortController on SSE disconnect and rolls back project state', async () => {
+    const repo = new MemoryProjectRepository();
+    let capturedAbortSignal: AbortSignal | undefined;
+    let notifyLlmStarted: (() => void) | null = null;
+    const llmStarted = new Promise<void>((resolve) => {
+      notifyLlmStarted = resolve;
+    });
+
+    const slowAbortableLlm: LLMProvider = {
+      listModels: () => [
+        { id: 'slow-abort', label: 'Slow', provider: 'mock', available: true },
+      ],
+      generateObject: async (input) => {
+        capturedAbortSignal = input.abortSignal;
+        notifyLlmStarted?.();
+        return new Promise((_, reject) => {
+          if (input.abortSignal?.aborted) {
+            reject(input.abortSignal.reason ?? new Error('Aborted'));
+            return;
+          }
+          input.abortSignal?.addEventListener(
+            'abort',
+            () => reject(input.abortSignal?.reason ?? new Error('Aborted')),
+            { once: true }
+          );
+        });
+      },
+      async *streamText() {
+        yield 'unused';
+      },
+    };
+
+    const workflow = new AtomsWorkflowEngine({
+      repo,
+      llm: slowAbortableLlm,
+      builder: new EsbuildStaticBuilder(),
+      publisher: new SameOriginSitePublisher(repo, 'http://localhost:3000'),
+      apiBaseUrl: 'http://localhost:3000',
+    });
+
+    const project = await repo.create({
+      title: 'Abort Disconnect Test',
+      slug: 'abort-disconnect-test',
+    });
+
+    const reqAbort = new AbortController();
+    const req = new Request(
+      `http://localhost:3000/api/projects/${project.id}/start`,
+      {
+        method: 'POST',
+        signal: reqAbort.signal,
+      }
+    );
+    const sseRes = createSseResponse(
+      (signal) => workflow.start(project.id, 'Cancel test idea', { signal }),
+      req
+    );
+    const reader = sseRes.body!.getReader();
+    const firstChunk = await reader.read();
+    expect(firstChunk.done).toBe(false);
+
+    await llmStarted;
+    expect(capturedAbortSignal?.aborted).toBe(false);
+    reqAbort.abort(new Error('Client closed tab'));
+
+    while (!(await reader.read()).done) {
+      // drain remaining SSE bytes
+    }
+
+    expect(capturedAbortSignal?.aborted).toBe(true);
+    const afterAbort = await repo.getById(project.id);
+    expect(afterAbort?.status).toBe('error');
+
+    // Verify project run lock was released cleanly
+    const secondRun = workflow.start(project.id, 'Retry after abort');
+    const secondIter = secondRun[Symbol.asyncIterator]();
+    const firstRetryEv = await secondIter.next();
+    expect(firstRetryEv.done).toBe(false);
+    expect(firstRetryEv.value?.type).toBe('role_start');
+    await secondIter.return?.();
+  }, 15000);
 });

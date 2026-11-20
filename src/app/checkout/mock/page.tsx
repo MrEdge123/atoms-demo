@@ -1,5 +1,10 @@
 'use client';
 
+/**
+ * Mock Checkout Page (LOCAL / DEMO SIMULATION ONLY — NO REAL PAYMENT GATEWAY).
+ * Reads the per-project end-user token (`atoms_cloud_token_<projectId>`) so only
+ * the authenticated user who initiated checkout can trigger the simulated webhook.
+ */
 import React, { Suspense, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { CheckCircle2, CreditCard, Lock, ShieldCheck } from 'lucide-react';
@@ -37,9 +42,22 @@ function MockCheckoutInner() {
     setPaying(true);
     setError('');
     try {
+      const token =
+        typeof window !== 'undefined'
+          ? window.localStorage.getItem(`atoms_cloud_token_${projectId}`)
+          : null;
+      if (!token) {
+        throw new Error(
+          '未检测到当前应用的登录凭证，请先在已发布站点登录后再升级 Pro'
+        );
+      }
+
       const res = await fetch('/api/cloud/mock-checkout/complete', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
         body: JSON.stringify({ sessionId, projectId, userId, plan }),
       });
       const data = (await res.json()) as { ok?: boolean; error?: string };

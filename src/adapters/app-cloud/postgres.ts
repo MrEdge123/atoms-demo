@@ -16,6 +16,7 @@ import {
   verifyAppToken,
   verifyPassword,
 } from './crypto';
+import { assertRecordAccess, resolveCloudDbPagination } from './db-utils';
 
 const MAX_RECORD_BYTES = 50 * 1024;
 
@@ -139,6 +140,37 @@ export class PostgresAppCloudRuntime implements AppCloudRuntime {
         );
         return res.rows.length > 0;
       },
+      recordOrderAndSetUserPlan: async (order) => {
+        return sql.transaction(async (tx) => {
+          const inserted = await tx.query<{ order_id: string }>(
+            `INSERT INTO billing_orders (order_id, project_id, user_id, plan, provider, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (order_id) DO NOTHING
+             RETURNING order_id`,
+            [
+              order.orderId,
+              order.projectId,
+              order.userId,
+              order.plan,
+              order.provider,
+              new Date().toISOString(),
+            ]
+          );
+          if (inserted.rows.length === 0) {
+            return { applied: false };
+          }
+          const updated = await tx.query<{ id: string }>(
+            'UPDATE app_users SET plan = $3 WHERE id = $1 AND project_id = $2 RETURNING id',
+            [order.userId, order.projectId, order.plan]
+          );
+          if (updated.rows.length === 0) {
+            throw new Error(
+              `User "${order.userId}" not found in project "${order.projectId}"`
+            );
+          }
+          return { applied: true };
+        });
+      },
     };
 
     this.billing = opts.billingFactory
@@ -166,20 +198,33 @@ export class PostgresAppCloudRuntime implements AppCloudRuntime {
       },
 
       list: async (projectId, collection, filter) => {
+        const { limit, offset } = resolveCloudDbPagination(filter);
         const res = filter?.ownerUserId
           ? await sql.query<RecordRow>(
               `SELECT * FROM app_records
                WHERE project_id = $1 AND collection = $2 AND owner_user_id = $3
-               ORDER BY created_at DESC`,
-              [projectId, collection, filter.ownerUserId]
+               ORDER BY created_at DESC
+               LIMIT $4 OFFSET $5`,
+              [projectId, collection, filter.ownerUserId, limit, offset]
             )
           : await sql.query<RecordRow>(
               `SELECT * FROM app_records
                WHERE project_id = $1 AND collection = $2
-               ORDER BY created_at DESC`,
-              [projectId, collection]
+               ORDER BY created_at DESC
+               LIMIT $3 OFFSET $4`,
+              [projectId, collection, limit, offset]
             );
         return res.rows.map(mapRecordRow);
+      },
+
+      getById: async (projectId, collection, id) => {
+        const res = await sql.query<RecordRow>(
+          `SELECT * FROM app_records
+           WHERE id = $1 AND project_id = $2 AND collection = $3
+           LIMIT 1`,
+          [id, projectId, collection]
+        );
+        return res.rows[0] ? mapRecordRow(res.rows[0]) : null;
       },
 
       create: async (projectId, collection, data, ownerUserId) => {
@@ -195,42 +240,53 @@ export class PostgresAppCloudRuntime implements AppCloudRuntime {
         return mapRecordRow(res.rows[0]);
       },
 
-      update: async (projectId, collection, id, patch) => {
-        const existing = await sql.query<RecordRow>(
-          `SELECT * FROM app_records
-           WHERE id = $1 AND project_id = $2 AND collection = $3
-           LIMIT 1`,
-          [id, projectId, collection]
-        );
-        if (!existing.rows[0]) {
-          throw new Error(`Record "${id}" not found`);
-        }
-        const merged = {
-          ...parseJsonObject(existing.rows[0].data_json),
-          ...patch,
-        };
-        assertRecordSize(merged);
-        const now = new Date().toISOString();
-        const updated = await sql.query<RecordRow>(
-          `UPDATE app_records
-           SET data_json = $4::jsonb, updated_at = $5
-           WHERE id = $1 AND project_id = $2 AND collection = $3
-           RETURNING *`,
-          [id, projectId, collection, JSON.stringify(merged), now]
-        );
-        return mapRecordRow(updated.rows[0]);
+      update: async (projectId, collection, id, patch, updateOpts) => {
+        return sql.transaction(async (tx) => {
+          const existing = await tx.query<RecordRow>(
+            `SELECT * FROM app_records
+             WHERE id = $1 AND project_id = $2 AND collection = $3
+             LIMIT 1`,
+            [id, projectId, collection]
+          );
+          if (!existing.rows[0]) {
+            throw new Error(`Record "${id}" not found`);
+          }
+          assertRecordAccess(existing.rows[0].owner_user_id, updateOpts);
+          const merged = {
+            ...parseJsonObject(existing.rows[0].data_json),
+            ...patch,
+          };
+          assertRecordSize(merged);
+          const now = new Date().toISOString();
+          const updated = await tx.query<RecordRow>(
+            `UPDATE app_records
+             SET data_json = $4::jsonb, updated_at = $5
+             WHERE id = $1 AND project_id = $2 AND collection = $3
+             RETURNING *`,
+            [id, projectId, collection, JSON.stringify(merged), now]
+          );
+          return mapRecordRow(updated.rows[0]);
+        });
       },
 
-      remove: async (projectId, collection, id) => {
-        const res = await sql.query<{ id: string }>(
-          `DELETE FROM app_records
-           WHERE id = $1 AND project_id = $2 AND collection = $3
-           RETURNING id`,
-          [id, projectId, collection]
-        );
-        if (res.rows.length === 0) {
-          throw new Error(`Record "${id}" not found`);
-        }
+      remove: async (projectId, collection, id, removeOpts) => {
+        await sql.transaction(async (tx) => {
+          const existing = await tx.query<{ owner_user_id: string | null }>(
+            `SELECT owner_user_id FROM app_records
+             WHERE id = $1 AND project_id = $2 AND collection = $3
+             LIMIT 1`,
+            [id, projectId, collection]
+          );
+          if (!existing.rows[0]) {
+            throw new Error(`Record "${id}" not found`);
+          }
+          assertRecordAccess(existing.rows[0].owner_user_id, removeOpts);
+          await tx.query(
+            `DELETE FROM app_records
+             WHERE id = $1 AND project_id = $2 AND collection = $3`,
+            [id, projectId, collection]
+          );
+        });
       },
     };
 
@@ -311,12 +367,19 @@ export class PostgresAppCloudRuntime implements AppCloudRuntime {
     };
 
     this.ai = {
-      complete: async (_projectId, prompt) => {
+      complete: async (_projectId, prompt, aiOpts) => {
+        if (aiOpts?.abortSignal?.aborted) {
+          throw (
+            aiOpts.abortSignal.reason ?? new Error('AI request aborted')
+          );
+        }
         if (opts.llm) {
           let buf = '';
           for await (const chunk of opts.llm.streamText({
             system: 'You are a helpful AI assistant embedded inside an Atoms app.',
             prompt,
+            maxTokens: aiOpts?.maxTokens,
+            abortSignal: aiOpts?.abortSignal,
           })) {
             buf += chunk;
           }

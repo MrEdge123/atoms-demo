@@ -11,11 +11,11 @@
 | 检查项 | 实测状态 | 说明 |
 | :--- | :--- | :--- |
 | **WSL2 发行版** | **已连通** | 默认发行版 `Ubuntu`（`Running`，WSL Version `2`）；`docker-desktop` 与 `docker-desktop-data` 当前处于 `Stopped` 状态 |
-| **WSL2 用户与家目录** | `mredge` | 家目录 `/home/mredge` |
-| **Node.js (Linux)** | **已安装（via `nvm`）** | `/home/mredge/.nvm/versions/node/` 下已有 `v24.18.1` 与 `v22.22.2` |
-| **Git (Linux)** | **已安装** | `/usr/bin/git`（`git version 2.34.1`） |
-| **pnpm / psql** | 未安装 | 当前 `Ubuntu` 内未检出 `pnpm` 与 `psql`，用 `npm` 即可或按需再安装 |
-| **目录跨端读写** | **已验证打通** | Windows 目录直接映射为 WSL2 `/mnt/c/Users/happy/.gemini/antigravity/scratch/atoms-demo`（权限 `drwxrwxrwx`） |
+| **WSL2 用户与家目录** | `<your-wsl-user>` | 家目录 `~`（`/home/<your-wsl-user>`） |
+| **Node.js (Linux)** | **已安装（via `nvm`）** | `~/.nvm/versions/node/` 下可安装并切换 `v24.x` / `v22.x` |
+| **Git (Linux)** | **已安装** | `/usr/bin/git` |
+| **pnpm / psql** | 按需安装 | 当前仅依赖 `npm` 即可跑通完整开发与构建 |
+| **目录跨端读写** | **已验证打通** | Windows 仓库目录可映射至 WSL2 `/mnt/c/<your-workspace>/atoms-demo` |
 | **Windows 宿主工具** | 已安装 | Windows 侧 `node v24.18.1`、`npm`、`git` 均可用 |
 
 ---
@@ -29,11 +29,11 @@
 - 在非交互脚本或从 Windows 通过 `wsl.exe` 调用时，优先显式加载 `nvm`（避免在 PowerShell 传参时嵌套双引号导致参数解析异常）：
 
 ```bash
-source /home/mredge/.nvm/nvm.sh
-which node   # /home/mredge/.nvm/versions/node/v24.18.1/bin/node
-which npm    # /home/mredge/.nvm/versions/node/v24.18.1/bin/npm
+source ~/.nvm/nvm.sh
+which node   # ~/.nvm/versions/node/v24.18.1/bin/node
+which npm    # ~/.nvm/versions/node/v24.18.1/bin/npm
 node -v      # v24.18.1
-npm -v       # 11.16.0
+npm -v
 ```
 
 ---

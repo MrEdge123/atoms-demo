@@ -711,7 +711,13 @@ export class MockLLMProvider implements LLMProvider {
     prompt: string;
     schema: SchemaLike<T>;
     model?: string;
+    abortSignal?: AbortSignal;
   }): Promise<T> {
+    if (input.abortSignal?.aborted) {
+      throw (
+        input.abortSignal.reason ?? new Error('LLM request aborted')
+      );
+    }
     if (input.system.startsWith('You are Iris,')) {
       const idea =
         extractSection(
@@ -933,7 +939,15 @@ export class MockLLMProvider implements LLMProvider {
     system: string;
     prompt: string;
     model?: string;
+    maxTokens?: number;
+    abortSignal?: AbortSignal;
   }): AsyncIterable<string> {
-    yield `MockLLM(${input.model ?? 'mock-default'}): 已响应 "${input.prompt.slice(0, 60)}"`;
+    if (input.abortSignal?.aborted) {
+      throw (
+        input.abortSignal.reason ?? new Error('LLM request aborted')
+      );
+    }
+    const text = `MockLLM(${input.model ?? 'mock-default'}): 已响应 "${input.prompt.slice(0, 60)}"`;
+    yield input.maxTokens ? text.slice(0, input.maxTokens) : text;
   }
 }

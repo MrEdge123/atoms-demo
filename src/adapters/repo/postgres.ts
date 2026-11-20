@@ -15,6 +15,7 @@ import type { SqlClient } from '../storage/sql-client';
 interface ProjectRow {
   id: string;
   slug: string;
+  owner_sid?: string | null;
   title: string;
   status: string;
   capabilities_json: unknown;
@@ -57,6 +58,7 @@ function mapProjectRow(row: ProjectRow): Project {
   return {
     id: row.id,
     slug: row.slug,
+    ownerSid: row.owner_sid ?? null,
     title: row.title,
     status: row.status as ProjectStatus,
     capabilities: parseJson<CloudCapability[]>(row.capabilities_json, ['db']),
@@ -77,7 +79,11 @@ function mapProjectRow(row: ProjectRow): Project {
 export class PostgresProjectRepository implements ProjectRepository {
   constructor(private readonly sql: SqlClient) {}
 
-  async create(input: { title: string; slug: string }): Promise<Project> {
+  async create(input: {
+    title: string;
+    slug: string;
+    ownerSid?: string | null;
+  }): Promise<Project> {
     const now = new Date().toISOString();
     const id = `proj_${crypto.randomUUID().slice(0, 8)}`;
     const baseSlug =
@@ -97,16 +103,17 @@ export class PostgresProjectRepository implements ProjectRepository {
     }
 
     const title = input.title.trim() || 'Untitled App';
+    const ownerSid = input.ownerSid ?? null;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
         const res = await this.sql.query<ProjectRow>(
           `INSERT INTO projects (
-            id, slug, title, status, capabilities_json, plan_json,
+            id, slug, owner_sid, title, status, capabilities_json, plan_json,
             draft_files_json, race_branches_json, published_files_json,
             published_html, published_version, created_at, updated_at
-          ) VALUES ($1, $2, $3, 'idle', $4::jsonb, NULL, '{}'::jsonb, '[]'::jsonb, NULL, NULL, 0, $5, $5)
+          ) VALUES ($1, $2, $3, $4, 'idle', $5::jsonb, NULL, '{}'::jsonb, '[]'::jsonb, NULL, NULL, 0, $6, $6)
           RETURNING *`,
-          [id, slug, title, JSON.stringify(['db']), now]
+          [id, slug, ownerSid, title, JSON.stringify(['db']), now]
         );
         return mapProjectRow(res.rows[0]);
       } catch (err) {
@@ -124,10 +131,16 @@ export class PostgresProjectRepository implements ProjectRepository {
     throw new Error('Failed to create project after slug collision retries');
   }
 
-  async listAll(): Promise<Project[]> {
-    const res = await this.sql.query<ProjectRow>(
-      'SELECT * FROM projects ORDER BY updated_at DESC'
-    );
+  async listAll(filter?: { ownerSid?: string }): Promise<Project[]> {
+    const res =
+      filter?.ownerSid !== undefined
+        ? await this.sql.query<ProjectRow>(
+            'SELECT * FROM projects WHERE owner_sid = $1 ORDER BY updated_at DESC',
+            [filter.ownerSid]
+          )
+        : await this.sql.query<ProjectRow>(
+            'SELECT * FROM projects ORDER BY updated_at DESC'
+          );
     return res.rows.map(mapProjectRow);
   }
 
@@ -200,40 +213,69 @@ export class PostgresProjectRepository implements ProjectRepository {
       expectedRunId?: string;
       files: VirtualFS;
       designSystem?: DesignSystemSpec;
+      auditEvent?: Omit<AgentEvent, 'seq'>;
     }
   ): Promise<Project | null> {
     const now = new Date().toISOString();
-    const res = await this.sql.query<ProjectRow>(
-      `UPDATE projects
-       SET draft_files_json = $2::jsonb,
-           status = 'ready',
-           race_branches_json = '[]'::jsonb,
-           plan_json = CASE
-             WHEN $3::jsonb IS NOT NULL AND plan_json IS NOT NULL
-             THEN jsonb_set(plan_json, '{designSystem}', $3::jsonb, true)
-             ELSE plan_json
-           END,
-           updated_at = $4
-       WHERE id = $1
-         AND status NOT IN ('planning', 'awaiting_confirmation', 'building')
-         AND jsonb_typeof(race_branches_json) = 'array'
-         AND EXISTS (
-           SELECT 1
-           FROM jsonb_array_elements(race_branches_json) AS elem
-           WHERE elem->>'branchId' = $5
-             AND ($6::text IS NULL OR elem->>'runId' = $6)
-         )
-       RETURNING *`,
-      [
-        id,
-        JSON.stringify(input.files),
-        input.designSystem ? JSON.stringify(input.designSystem) : null,
-        now,
-        input.branchId,
-        input.expectedRunId ?? null,
-      ]
-    );
-    return res.rows[0] ? mapProjectRow(res.rows[0]) : null;
+    return this.sql.transaction(async (tx) => {
+      const res = await tx.query<ProjectRow>(
+        `UPDATE projects
+         SET draft_files_json = $2::jsonb,
+             status = 'ready',
+             race_branches_json = '[]'::jsonb,
+             plan_json = CASE
+               WHEN $3::jsonb IS NOT NULL AND plan_json IS NOT NULL
+               THEN jsonb_set(plan_json, '{designSystem}', $3::jsonb, true)
+               ELSE plan_json
+             END,
+             updated_at = $4
+         WHERE id = $1
+           AND status NOT IN ('planning', 'awaiting_confirmation', 'building')
+           AND jsonb_typeof(race_branches_json) = 'array'
+           AND EXISTS (
+             SELECT 1
+             FROM jsonb_array_elements(race_branches_json) AS elem
+             WHERE elem->>'branchId' = $5
+               AND ($6::text IS NULL OR elem->>'runId' = $6)
+           )
+         RETURNING *`,
+        [
+          id,
+          JSON.stringify(input.files),
+          input.designSystem ? JSON.stringify(input.designSystem) : null,
+          now,
+          input.branchId,
+          input.expectedRunId ?? null,
+        ]
+      );
+      if (!res.rows[0]) {
+        return null;
+      }
+
+      if (input.auditEvent) {
+        const seqRes = await tx.query<{ max_seq: string | number }>(
+          'SELECT COALESCE(MAX(seq), 0) AS max_seq FROM project_events WHERE project_id = $1',
+          [id]
+        );
+        const nextSeq = Number(seqRes.rows[0]?.max_seq ?? 0) + 1;
+        await tx.query(
+          `INSERT INTO project_events (id, project_id, seq, role, branch_id, type, payload_json, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)`,
+          [
+            `evt_${crypto.randomUUID()}`,
+            id,
+            nextSeq,
+            input.auditEvent.role,
+            input.auditEvent.branchId ?? null,
+            input.auditEvent.type,
+            JSON.stringify(input.auditEvent.payload ?? null),
+            input.auditEvent.timestamp,
+          ]
+        );
+      }
+
+      return mapProjectRow(res.rows[0]);
+    });
   }
 
   async savePublished(

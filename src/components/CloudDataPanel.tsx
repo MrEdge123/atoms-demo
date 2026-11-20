@@ -3,6 +3,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Crown, Database, RefreshCw, Trash2, Users } from 'lucide-react';
 import type { AppRecord, AppUser } from '@/domain';
+import { workbenchFetch } from '@/lib/workbench-fetch';
 
 interface CollectionSummary {
   name: string;
@@ -36,7 +37,7 @@ export function CloudDataPanel({ projectId }: CloudDataPanelProps) {
       setError('');
       try {
         const qs = col ? `?collection=${encodeURIComponent(col)}` : '';
-        const res = await fetch(`/api/projects/${projectId}/cloud${qs}`);
+        const res = await workbenchFetch(`/api/projects/${projectId}/cloud${qs}`);
         const json = (await res.json()) as CloudDataResponse & { error?: string };
         if (!res.ok) throw new Error(json.error || '加载 Cloud 数据失败');
         setData(json);
@@ -56,7 +57,7 @@ export function CloudDataPanel({ projectId }: CloudDataPanelProps) {
 
   async function handleDeleteRecord(collection: string, recordId: string) {
     try {
-      const res = await fetch(
+      const res = await workbenchFetch(
         `/api/projects/${projectId}/cloud?collection=${encodeURIComponent(collection)}&recordId=${encodeURIComponent(recordId)}`,
         { method: 'DELETE' }
       );

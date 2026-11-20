@@ -14,7 +14,7 @@ export interface WorkflowEngine {
   start(
     projectId: string,
     idea: string,
-    opts?: { model?: string; styleTheme?: StyleThemeSpec }
+    opts?: { model?: string; styleTheme?: StyleThemeSpec; signal?: AbortSignal }
   ): AsyncIterable<AgentEvent>;
 
   confirmPlan(
@@ -23,6 +23,7 @@ export interface WorkflowEngine {
       planPatch?: Partial<ProductPlan>;
       model?: string;
       mode?: 'linear' | 'race';
+      signal?: AbortSignal;
     }
   ): AsyncIterable<AgentEvent>;
 
@@ -35,7 +36,7 @@ export interface WorkflowEngine {
   iterate(
     projectId: string,
     instruction: string,
-    opts?: { model?: string }
+    opts?: { model?: string; signal?: AbortSignal }
   ): AsyncIterable<AgentEvent>;
 
   publish(projectId: string): Promise<PublishResult>;

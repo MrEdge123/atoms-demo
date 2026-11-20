@@ -32,11 +32,16 @@ export async function GET(
     ownerUserId = user.id;
   }
 
-  const records = await c.appCloud.db.list(
-    projectId,
-    collection,
-    ownerUserId ? { ownerUserId } : undefined
-  );
+  const rawLimit = url.searchParams.get('limit');
+  const rawOffset = url.searchParams.get('offset');
+  const limit = rawLimit !== null ? Number(rawLimit) : undefined;
+  const offset = rawOffset !== null ? Number(rawOffset) : undefined;
+
+  const records = await c.appCloud.db.list(projectId, collection, {
+    ...(ownerUserId ? { ownerUserId } : {}),
+    ...(limit !== undefined && Number.isFinite(limit) ? { limit } : {}),
+    ...(offset !== undefined && Number.isFinite(offset) ? { offset } : {}),
+  });
   return jsonWithCors({ records });
 }
 
@@ -59,15 +64,20 @@ export async function POST(
   try {
     const c = await getContainer();
     const token = extractBearerToken(req);
-    const user = token
-      ? await c.appCloud.auth.verifyToken(projectId, token)
-      : null;
+    let ownerUserId: string | undefined;
+    if (token) {
+      const user = await c.appCloud.auth.verifyToken(projectId, token);
+      if (!user) {
+        return jsonWithCors({ error: 'Invalid session token' }, { status: 401 });
+      }
+      ownerUserId = user.id;
+    }
 
     const record = await c.appCloud.db.create(
       projectId,
       collection,
       body.data,
-      user?.id
+      ownerUserId
     );
     return jsonWithCors({ record }, { status: 201 });
   } catch (err) {

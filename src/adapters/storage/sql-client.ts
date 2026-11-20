@@ -6,12 +6,15 @@ import { Pool } from 'pg';
 /**
  * Unified PostgreSQL query interface shared across local PGlite and remote/node-pg.
  */
+export type SqlExecutor = Pick<SqlClient, 'query' | 'exec'>;
+
 export interface SqlClient {
   query<T = Record<string, unknown>>(
     sql: string,
     params?: unknown[]
   ): Promise<{ rows: T[] }>;
   exec(sql: string): Promise<void>;
+  transaction<T>(fn: (tx: SqlExecutor) => Promise<T>): Promise<T>;
   close(): Promise<void>;
 }
 
@@ -19,6 +22,7 @@ const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS projects (
   id TEXT PRIMARY KEY,
   slug TEXT NOT NULL UNIQUE,
+  owner_sid TEXT,
   title TEXT NOT NULL,
   status TEXT NOT NULL,
   capabilities_json JSONB NOT NULL DEFAULT '["db"]',
@@ -31,6 +35,11 @@ CREATE TABLE IF NOT EXISTS projects (
   created_at TIMESTAMPTZ NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL
 );
+
+ALTER TABLE projects ADD COLUMN IF NOT EXISTS owner_sid TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_projects_owner_sid_updated
+  ON projects (owner_sid, updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS project_events (
   id TEXT PRIMARY KEY,
@@ -116,6 +125,24 @@ export class PGliteSqlClient implements SqlClient {
     await this.db.exec(sql);
   }
 
+  async transaction<T>(fn: (tx: SqlExecutor) => Promise<T>): Promise<T> {
+    await this.ready;
+    return this.db.transaction((tx) =>
+      fn({
+        query: async <R = Record<string, unknown>>(
+          sql: string,
+          params: unknown[] = []
+        ): Promise<{ rows: R[] }> => {
+          const res = await tx.query<R>(sql, params);
+          return { rows: res.rows };
+        },
+        exec: async (sql: string): Promise<void> => {
+          await tx.exec(sql);
+        },
+      })
+    );
+  }
+
   async close(): Promise<void> {
     await this.ready;
     await this.db.close();
@@ -161,6 +188,33 @@ export class NodePgSqlClient implements SqlClient {
   async exec(sql: string): Promise<void> {
     await this.ensureReady();
     await this.pool.query(sql);
+  }
+
+  async transaction<T>(fn: (tx: SqlExecutor) => Promise<T>): Promise<T> {
+    await this.ensureReady();
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await fn({
+        query: async <R = Record<string, unknown>>(
+          sql: string,
+          params: unknown[] = []
+        ): Promise<{ rows: R[] }> => {
+          const res = await client.query(sql, params);
+          return { rows: res.rows as R[] };
+        },
+        exec: async (sql: string): Promise<void> => {
+          await client.query(sql);
+        },
+      });
+      await client.query('COMMIT');
+      return result;
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw err;
+    } finally {
+      client.release();
+    }
   }
 
   async close(): Promise<void> {

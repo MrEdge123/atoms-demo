@@ -39,6 +39,7 @@ export class CompositeLLMProvider implements LLMProvider {
     prompt: string;
     schema: SchemaLike<T>;
     model?: string;
+    abortSignal?: AbortSignal;
   }): Promise<T> {
     return this.pickProvider(input.model).generateObject(input);
   }
@@ -47,6 +48,8 @@ export class CompositeLLMProvider implements LLMProvider {
     system: string;
     prompt: string;
     model?: string;
+    maxTokens?: number;
+    abortSignal?: AbortSignal;
   }): AsyncIterable<string> {
     return this.pickProvider(input.model).streamText(input);
   }

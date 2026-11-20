@@ -83,7 +83,7 @@
 ### 4.2 编译期 + 运行期双闭环自愈
 - **编译期自愈**：`Alex` 写完文件 → `EsbuildStaticBuilder.compile()` → 若 `ok === false`，编排器自动将错误堆栈与对应文件内容回传给 `Alex` 修复（默认上限 2 轮）。
 - **运行期兜底**：打包 HTML 时在根组件外自动包裹 `RuntimeErrorBoundary` 并监听 `window.onerror` / `unhandledrejection`：
-  - **预览态（`mode: 'preview'`）**：通过 `window.parent.postMessage` 将运行期异常上报给工作台，支持一键或自动回传修复；
+  - **预览态（`mode: 'preview'`）**：通过 `window.parent.postMessage` 将运行期异常上报给工作台，仅提供工作台“一键修复”按钮触发手动回传修复（无运行期自动触发闭环）；
   - **线上态（`mode: 'production'`）**：展示友好降级界面，不白屏，也不暴露工作台调试通道。
 
 ### 4.3 最小 4 张表实现“真持久化 + 草稿/线上隔离”
@@ -91,7 +91,7 @@
 ```sql
 -- 1. 平台项目表（草稿态、Race Mode 候选分支与线上发布态严格隔离）
 projects (
-  id, slug UNIQUE, title, status,
+  id, slug UNIQUE, owner_sid, title, status,
   capabilities_json, plan_json,
   draft_files_json, race_branches_json,
   published_files_json, published_html, published_version,
@@ -117,9 +117,11 @@ app_records (
 ```
 
 **安全边界**：
-- 工作台登录态与 `/s/[slug]` 站点访问者登录态完全分离；
-- `/api/cloud/[projectId]/*` 仅认作用域锁定在 `projectId` 的 Bearer Token，防止跨站点越权读写；
-- 对单条 `app_records.data_json` 做大小限制（如 ≤ 50KB），防止恶意写入撑爆数据库。
+- 工作台通过签名匿名 `atoms_sid` Cookie 归属项目（无 `owner_sid` 的历史/示例项目对所有访问者只读），写接口强制校验 `Origin`、`X-Atoms-Workbench: 1` 与非 `/s/` `Referer`；
+- 工作台会话与 `/s/[slug]` 站点访问者登录态完全分离；生成站点经由 CSP 限制仅允许 `connect-src <origin>/api/cloud/`、`frame-ancestors 'self'` 与 `object-src 'none'`，端用户 token 键名按 `projectId` 隔离（`atoms_cloud_token_<projectId>`）；
+- `/api/cloud/[projectId]/*` 强制校验端用户 Bearer Token（`PATCH`/`DELETE` 仅允许本人或配置的公开集合中无归属记录），`/ai` 接口启用“Token 或已发布站同源”鉴权与 IP/项目限流（`429`）；
+- LLM 错误日志脱敏（`sanitizeErrorMessage`）会先将错误文本截断到 `1000` 字符再执行正则匹配脱敏，防止超长异常报文触发灾难性正则回溯（ReDoS）；
+- 对单条 `app_records.data_json` 做大小限制（≤ 50KB），列表查询强制分页上限（默认 50，最高由 `CLOUD_DB_MAX_LIMIT` 控制，默认 100）。
 
 ### 4.4 统一 SQL 层（`PGlite` + `pg`）、异步收款闭环与集中装配
 
@@ -149,13 +151,13 @@ BILLING_ADAPTER=mock | creem
 atoms-demo/
 ├── docs/                  # 调研、取舍、架构与 WSL2 环境文档
 ├── src/
-│   ├── domain/            # 已创建：领域模型与事件协议（零依赖）
-│   ├── ports/             # 已创建：5 大核心端口 + WorkflowEngine 接口
-│   ├── core/              # 待建：编排状态机、3 角色 Prompt、@atoms/cloud 客户端 SDK
-│   ├── adapters/          # 待建：mock / memory / esbuild / postgres / vercel-ai / same-origin
-│   ├── container.ts       # 待建：环境变量驱动装配容器
-│   ├── app/               # 待建：Next.js 工作台 UI + /s/[slug] + /api/projects + /api/cloud
-│   └── tests/             # 待建：L1 / L2 / L3 三层闭环测试
+│   ├── domain/            # 已实现：领域模型与事件协议（零依赖）
+│   ├── ports/             # 已实现：5 大核心端口 + WorkflowEngine 接口
+│   ├── core/              # 已实现：编排状态机、3 角色 Prompt、@atoms/cloud 客户端 SDK
+│   ├── adapters/          # 已实现：mock / memory / esbuild / postgres / vercel-ai / same-origin
+│   ├── container.ts       # 已实现：环境变量驱动装配容器
+│   ├── app/               # 已实现：Next.js 工作台 UI + /s/[slug] + /api/projects + /api/cloud
+│   └── tests/             # 已实现：L1 / L2 三层闭环测试
 └── README.md
 ```
 
@@ -163,8 +165,10 @@ atoms-demo/
 
 ## 6. 三层闭环自动化测试策略
 
-| 层级 | 装配组合 | 运行耗时 & 成本 | 核心验收闭环 |
+> **事件下发说明**：Iris/Emma 阶段按步骤产出 `AgentEvent`，而 Alex 在 `buildWithAutoFix` 阶段内的 `thought / file_write / autofix_start / build_result` 事件会在内存 `buffered[]` 中累积并在整轮构建/自动修复完成后随 SSE 响应统一下发并落库（非逐文件/逐 token 实时流式推送）。
+
+| 层级 | 装配组合 | 运行形态 | 核心验收闭环 |
 | :--- | :--- | :--- | :--- |
-| **L1 契约与编排闭环** | `MockLLM` + **真实 `EsbuildStaticBuilder`** + `InMemoryAppCloud` + `MemoryProjectRepo` | **单次闭环 < 1 秒**（实测冷启 ~471ms / 热态 ~388ms）；全量 8 用例 L1 套件（含多次 `esbuild` + Tailwind v4 构建、Race Mode 与跨项目迭代）约 **7~8 秒** / 0 Token | 1. 未确认方案前绝不触发 Alex 编码；<br>2. Race Mode 候选分支未显式采用前拦截发布与普通迭代，保留既有线上版本；<br>3. MockLLM 首轮故意生成坏 TSX → esbuild 真实报错 → 次轮 Auto-Fix 修好并产出 HTML；<br>4. 跨项目交错迭代不串用模板并保留增量功能；<br>5. 草稿改坏不影响已发布 HTML，项目 A/B 数据与 Token 严格隔离。 |
-| **L2 真发布与持久化闭环** | 预置/生成 TSX + `EsbuildStaticBuilder` + **真实 PGlite / Postgres** + `SameOriginPublisher` | **~5~14 秒** / 0 Token | 真实 `PGlite` 重启跨进程恢复项目、事件流、Pro 订阅与业务数据；跨项目交错多轮迭代后重新发布，老数据完好且各站点数据严格隔离；路由集成全链路校验 409/404/401/200。 |
+| **L1 契约与编排闭环** | `MockLLM` + **真实 `EsbuildStaticBuilder`** + `InMemoryAppCloud` + `MemoryProjectRepo` | 离线 0 Token 运行 **15 用例** L1 套件（`src/tests/l1-pipeline.test.ts`） | 1. 未确认方案前绝不触发 Alex 编码；<br>2. Race Mode 候选分支未显式采用前拦截发布与普通迭代，保留既有线上版本；<br>3. MockLLM 首轮故意生成坏 TSX → esbuild 真实报错 → 次轮 Auto-Fix 修好并产出 HTML；<br>4. 跨项目交错迭代不串用模板并保留增量功能；<br>5. 设计指南/主题切换对比度与 SSE 断开 `AbortController` 回滚校验。 |
+| **L2 真发布与持久化闭环** | 预置/生成 TSX + `EsbuildStaticBuilder` + **真实 PGlite / Postgres** + `SameOriginPublisher` | 离线 0 Token 运行 **4 用例** PGlite 套件 + **3 用例** Route Handlers 套件 | 真实 `PGlite` 重启跨进程恢复项目、事件流、Pro 订阅与业务数据；Webhook/选枝 SQL 事务回滚校验；路由集成全链路校验 `atoms_sid` / `403` / `429` / CSP / DB 权限与 Mock Checkout 鉴权。 |
 | **L3 真大模型回归闭环** | **真实 `VercelAISDKProvider`** + 全套真实 Adapter | 按需运行 | 固定 3 个 Golden Prompts（活动报名签到 / 轻量 CRM / 带登录与 Pro 开关的笔记站），统计编译一次通过率、Auto-Fix 挽回率与端到端耗时。 |

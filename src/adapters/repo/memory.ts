@@ -17,7 +17,11 @@ export class MemoryProjectRepository implements ProjectRepository {
   private readonly projects = new Map<string, Project>();
   private readonly events = new Map<string, AgentEvent[]>();
 
-  async create(input: { title: string; slug: string }): Promise<Project> {
+  async create(input: {
+    title: string;
+    slug: string;
+    ownerSid?: string | null;
+  }): Promise<Project> {
     const now = new Date().toISOString();
     const id = `proj_${crypto.randomUUID().slice(0, 8)}`;
     const baseSlug =
@@ -38,6 +42,7 @@ export class MemoryProjectRepository implements ProjectRepository {
     const project: Project = {
       id,
       slug,
+      ownerSid: input.ownerSid ?? null,
       title: input.title.trim() || 'Untitled App',
       status: 'idle',
       plan: null,
@@ -56,8 +61,13 @@ export class MemoryProjectRepository implements ProjectRepository {
     return structuredClone(project);
   }
 
-  async listAll(): Promise<Project[]> {
-    return Array.from(this.projects.values())
+  async listAll(filter?: { ownerSid?: string }): Promise<Project[]> {
+    const items = Array.from(this.projects.values());
+    const filtered =
+      filter?.ownerSid !== undefined
+        ? items.filter((p) => p.ownerSid && p.ownerSid === filter.ownerSid)
+        : items;
+    return filtered
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
       .map((p) => structuredClone(p));
   }
@@ -106,6 +116,7 @@ export class MemoryProjectRepository implements ProjectRepository {
       expectedRunId?: string;
       files: VirtualFS;
       designSystem?: DesignSystemSpec;
+      auditEvent?: Omit<AgentEvent, 'seq'>;
     }
   ): Promise<Project | null> {
     const project = this.projects.get(id);
@@ -134,6 +145,15 @@ export class MemoryProjectRepository implements ProjectRepository {
       });
     }
     project.updatedAt = new Date().toISOString();
+
+    if (input.auditEvent) {
+      const list = this.events.get(id) ?? [];
+      const nextSeq =
+        list.length > 0 ? Math.max(...list.map((e) => e.seq)) + 1 : 1;
+      list.push(structuredClone({ ...input.auditEvent, seq: nextSeq }));
+      this.events.set(id, list);
+    }
+
     return structuredClone(project);
   }
 

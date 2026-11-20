@@ -45,8 +45,20 @@ function sanitizeErrorMessage(err: unknown): string {
     .slice(0, 400);
 }
 
-function createStreamAbort(timeoutMs: number) {
+function createStreamAbort(timeoutMs: number, externalSignal?: AbortSignal) {
   const controller = new AbortController();
+  const onExternalAbort = () => {
+    controller.abort(
+      externalSignal?.reason ?? new Error('Client disconnected')
+    );
+  };
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      onExternalAbort();
+    } else {
+      externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+    }
+  }
   const timer = setTimeout(
     () => controller.abort(new Error(`LLM request timed out after ${timeoutMs}ms`)),
     timeoutMs
@@ -55,6 +67,9 @@ function createStreamAbort(timeoutMs: number) {
     signal: controller.signal,
     cleanup(completed: boolean) {
       clearTimeout(timer);
+      if (externalSignal) {
+        externalSignal.removeEventListener('abort', onExternalAbort);
+      }
       if (!completed && !controller.signal.aborted) {
         controller.abort(new Error('LLM stream aborted early'));
       }
@@ -259,7 +274,13 @@ export class VercelAISDKProvider implements LLMProvider {
     prompt: string;
     schema: SchemaLike<T>;
     model?: string;
+    abortSignal?: AbortSignal;
   }): Promise<T> {
+    if (input.abortSignal?.aborted) {
+      throw (
+        input.abortSignal.reason ?? new Error('LLM request aborted')
+      );
+    }
     const { resolvedModelId, provider, temperature, maxTokens, model } =
       this.resolveEntry(input.model);
     const zodSchema = input.schema as unknown as ZodType<T>;
@@ -267,7 +288,7 @@ export class VercelAISDKProvider implements LLMProvider {
     console.log(`[LLM] start provider=${provider} model=${resolvedModelId}`);
 
     try {
-      const primaryAbort = createStreamAbort(120_000);
+      const primaryAbort = createStreamAbort(120_000, input.abortSignal);
       let primaryCompleted = false;
       const res =
         provider === 'anthropic'
@@ -335,13 +356,16 @@ export class VercelAISDKProvider implements LLMProvider {
         }
       }
     } catch (primaryErr) {
+      if (input.abortSignal?.aborted) {
+        throw primaryErr;
+      }
       const primaryMsg = sanitizeErrorMessage(primaryErr);
       console.warn(
         `[LLM] warn provider=${provider} model=${resolvedModelId} mode=streamObject failed (${Date.now() - started}ms): ${primaryMsg}; trying streamText JSON fallback`
       );
       // Resilient streaming fallback for domestic gateways that emit markdown fences
       // or occasionally fail strict schema validation mid-stream.
-      const fallbackAbort = createStreamAbort(60_000);
+      const fallbackAbort = createStreamAbort(60_000, input.abortSignal);
       let fallbackCompleted = false;
       const fallback = streamText({
         model,
@@ -406,14 +430,22 @@ export class VercelAISDKProvider implements LLMProvider {
     system: string;
     prompt: string;
     model?: string;
+    maxTokens?: number;
+    abortSignal?: AbortSignal;
   }): AsyncIterable<string> {
+    if (input.abortSignal?.aborted) {
+      throw (
+        input.abortSignal.reason ?? new Error('LLM request aborted')
+      );
+    }
     const { provider, temperature, model } = this.resolveEntry(input.model);
-    const abort = createStreamAbort(120_000);
+    const abort = createStreamAbort(120_000, input.abortSignal);
     let completed = false;
     const res = streamText({
       model,
       system: input.system,
       prompt: input.prompt,
+      ...(input.maxTokens ? { maxTokens: input.maxTokens } : {}),
       maxRetries: 0,
       abortSignal: abort.signal,
       onError: () => {},

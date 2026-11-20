@@ -456,11 +456,33 @@ export class EsbuildStaticBuilder implements AppBuilder {
 
       const runtimeJson = JSON.stringify(runtimeConfig).replace(/</g, '\\u003c');
 
+      let cloudConnectPrefix = '/api/cloud/';
+      try {
+        cloudConnectPrefix = `${new URL(input.apiBaseUrl).origin}/api/cloud/`;
+      } catch {
+        cloudConnectPrefix = '/api/cloud/';
+      }
+      const previewCspMeta =
+        input.mode === 'preview'
+          ? `\n  <meta http-equiv="Content-Security-Policy" content="${escapeHtml(
+              [
+                "default-src 'self'",
+                "script-src 'self' 'unsafe-inline'",
+                "style-src 'self' 'unsafe-inline'",
+                "img-src 'self' data: blob:",
+                "font-src 'self' data:",
+                `connect-src ${cloudConnectPrefix}`,
+                "object-src 'none'",
+                "base-uri 'self'",
+              ].join('; ')
+            )}" />`
+          : '';
+
       const html = `<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />${previewCspMeta}
   <title>${seoTitle}</title>
   <meta name="description" content="${seoDescription}" />
   <meta property="og:type" content="website" />

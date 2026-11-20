@@ -15,6 +15,7 @@ import {
   verifyAppToken,
   verifyPassword,
 } from './crypto';
+import { assertRecordAccess, resolveCloudDbPagination } from './db-utils';
 
 const MAX_RECORD_BYTES = 50 * 1024;
 
@@ -71,6 +72,20 @@ export class InMemoryAppCloudRuntime implements AppCloudRuntime {
         this.orders.set(order.orderId, order.projectId);
         return true;
       },
+      recordOrderAndSetUserPlan: async (order) => {
+        if (this.orders.has(order.orderId)) {
+          return { applied: false };
+        }
+        const user = this.users.get(order.userId);
+        if (!user || user.projectId !== order.projectId) {
+          throw new Error(
+            `User "${order.userId}" not found in project "${order.projectId}"`
+          );
+        }
+        this.orders.set(order.orderId, order.projectId);
+        user.plan = order.plan;
+        return { applied: true };
+      },
     };
 
     this.billing = opts.billingFactory
@@ -95,6 +110,7 @@ export class InMemoryAppCloudRuntime implements AppCloudRuntime {
       },
 
       list: async (projectId, collection, filter) => {
+        const { limit, offset } = resolveCloudDbPagination(filter);
         const out: AppRecord[] = [];
         for (const rec of this.records.values()) {
           if (rec.projectId !== projectId || rec.collection !== collection) {
@@ -105,7 +121,17 @@ export class InMemoryAppCloudRuntime implements AppCloudRuntime {
           }
           out.push(structuredClone(rec));
         }
-        return out.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+        return out
+          .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+          .slice(offset, offset + limit);
+      },
+
+      getById: async (projectId, collection, id) => {
+        const rec = this.records.get(id);
+        if (!rec || rec.projectId !== projectId || rec.collection !== collection) {
+          return null;
+        }
+        return structuredClone(rec);
       },
 
       create: async (projectId, collection, data, ownerUserId) => {
@@ -124,11 +150,12 @@ export class InMemoryAppCloudRuntime implements AppCloudRuntime {
         return structuredClone(record);
       },
 
-      update: async (projectId, collection, id, patch) => {
+      update: async (projectId, collection, id, patch, opts) => {
         const rec = this.records.get(id);
         if (!rec || rec.projectId !== projectId || rec.collection !== collection) {
           throw new Error(`Record "${id}" not found`);
         }
+        assertRecordAccess(rec.ownerUserId, opts);
         const merged = { ...rec.data, ...patch };
         assertRecordSize(merged);
         rec.data = merged;
@@ -136,11 +163,12 @@ export class InMemoryAppCloudRuntime implements AppCloudRuntime {
         return structuredClone(rec);
       },
 
-      remove: async (projectId, collection, id) => {
+      remove: async (projectId, collection, id, opts) => {
         const rec = this.records.get(id);
         if (!rec || rec.projectId !== projectId || rec.collection !== collection) {
           throw new Error(`Record "${id}" not found`);
         }
+        assertRecordAccess(rec.ownerUserId, opts);
         this.records.delete(id);
       },
     };
@@ -215,12 +243,19 @@ export class InMemoryAppCloudRuntime implements AppCloudRuntime {
     };
 
     this.ai = {
-      complete: async (_projectId, prompt) => {
+      complete: async (_projectId, prompt, aiOpts) => {
+        if (aiOpts?.abortSignal?.aborted) {
+          throw (
+            aiOpts.abortSignal.reason ?? new Error('AI request aborted')
+          );
+        }
         if (opts.llm) {
           let buf = '';
           for await (const chunk of opts.llm.streamText({
             system: 'You are a helpful AI assistant embedded inside an Atoms app.',
             prompt,
+            maxTokens: aiOpts?.maxTokens,
+            abortSignal: aiOpts?.abortSignal,
           })) {
             buf += chunk;
           }

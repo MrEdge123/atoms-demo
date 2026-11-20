@@ -15,11 +15,14 @@ export function corsOptionsResponse(): Response {
 
 export function jsonWithCors(
   data: unknown,
-  init?: { status?: number }
+  init?: { status?: number; headers?: Record<string, string> }
 ): NextResponse {
   return NextResponse.json(data, {
     status: init?.status ?? 200,
-    headers: CORS_HEADERS,
+    headers: {
+      ...CORS_HEADERS,
+      ...(init?.headers ?? {}),
+    },
   });
 }
 
@@ -31,18 +34,45 @@ export function extractBearerToken(req: Request): string | null {
 }
 
 export function createSseResponse(
-  iterable: AsyncIterable<AgentEvent>
+  iterableOrFactory:
+    | AsyncIterable<AgentEvent>
+    | ((signal: AbortSignal) => AsyncIterable<AgentEvent>),
+  req?: Request
 ): Response {
   const encoder = new TextEncoder();
+  const abortController = new AbortController();
   let heartbeat: ReturnType<typeof setInterval> | null = null;
   let closed = false;
+
+  const onReqAbort = () => {
+    closed = true;
+    abortController.abort(new Error('SSE client disconnected'));
+  };
+  if (req?.signal) {
+    if (req.signal.aborted) {
+      onReqAbort();
+    } else {
+      req.signal.addEventListener('abort', onReqAbort, { once: true });
+    }
+  }
+
+  const iterable =
+    typeof iterableOrFactory === 'function'
+      ? iterableOrFactory(abortController.signal)
+      : iterableOrFactory;
   const iterator = iterable[Symbol.asyncIterator]();
 
-  const stopHeartbeat = () => {
+  const stopHeartbeat = (completed = false) => {
     closed = true;
     if (heartbeat) {
       clearInterval(heartbeat);
       heartbeat = null;
+    }
+    if (req?.signal) {
+      req.signal.removeEventListener('abort', onReqAbort);
+    }
+    if (!completed && !abortController.signal.aborted) {
+      abortController.abort(new Error('SSE stream closed early'));
     }
   };
 
@@ -88,7 +118,7 @@ export function createSseResponse(
           }
         }
       } finally {
-        stopHeartbeat();
+        stopHeartbeat(completed);
         if (!completed) {
           await iterator.return?.().catch(() => undefined);
         }
@@ -100,7 +130,7 @@ export function createSseResponse(
       }
     },
     cancel() {
-      stopHeartbeat();
+      stopHeartbeat(false);
       void iterator.return?.().catch(() => undefined);
     },
   });

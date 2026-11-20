@@ -1,19 +1,30 @@
 import JSZip from 'jszip';
 import { NextResponse } from 'next/server';
 import { getContainer } from '@/container';
+import {
+  assertNotFromPublishedSiteReferer,
+  assertProjectAccess,
+  getVerifiedWorkbenchSid,
+} from '@/app/api/_security';
 
 export const dynamic = 'force-dynamic';
 
 export async function GET(
-  _req: Request,
+  req: Request,
   context: { params: Promise<{ id: string }> }
 ) {
+  const refererBlocked = assertNotFromPublishedSiteReferer(req);
+  if (refererBlocked) return refererBlocked;
+
   const { id } = await context.params;
   const c = await getContainer();
+  const sid = await getVerifiedWorkbenchSid(req, c.authSecret);
   const project = await c.repo.getById(id);
   if (!project) {
     return NextResponse.json({ error: 'Project not found' }, { status: 404 });
   }
+  const accessBlocked = assertProjectAccess(project, sid, 'read');
+  if (accessBlocked) return accessBlocked;
   if (Object.keys(project.draftFiles).length === 0) {
     return NextResponse.json(
       { error: '当前项目暂无可导出的草稿文件' },

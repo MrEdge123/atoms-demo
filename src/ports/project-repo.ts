@@ -13,9 +13,13 @@ import type {
  * Race Mode branches, and collaborative event streams.
  */
 export interface ProjectRepository {
-  create(input: { title: string; slug: string }): Promise<Project>;
+  create(input: {
+    title: string;
+    slug: string;
+    ownerSid?: string | null;
+  }): Promise<Project>;
 
-  listAll(): Promise<Project[]>;
+  listAll(filter?: { ownerSid?: string }): Promise<Project[]>;
 
   getById(id: string): Promise<Project | null>;
 
@@ -38,6 +42,7 @@ export interface ProjectRepository {
       expectedRunId?: string;
       files: VirtualFS;
       designSystem?: DesignSystemSpec;
+      auditEvent?: Omit<AgentEvent, 'seq'>;
     }
   ): Promise<Project | null>;
 

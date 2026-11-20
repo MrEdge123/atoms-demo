@@ -58,6 +58,24 @@ async function readSseEvents(res) {
   return events;
 }
 
+function extractCookieValue(res, name) {
+  const list =
+    typeof res.headers.getSetCookie === 'function'
+      ? res.headers.getSetCookie()
+      : res.headers.get('set-cookie')
+        ? [res.headers.get('set-cookie')]
+        : [];
+  for (const raw of list) {
+    for (const part of raw.split(/,(?=[^;]+=[^;]+)/)) {
+      const pair = part.trim().split(';')[0]?.trim() || '';
+      if (pair.startsWith(`${name}=`)) {
+        return pair;
+      }
+    }
+  }
+  return '';
+}
+
 async function main() {
   let child = null;
   let stdoutBuf = '';
@@ -96,6 +114,13 @@ async function main() {
       : `--- STDOUT ---\n${stdoutBuf}\n--- STDERR ---\n${stderrBuf}`;
 
   const createdIds = [];
+  let sessionCookie = '';
+  const wbHeaders = (extra = {}) => ({
+    ...(sessionCookie ? { Cookie: sessionCookie } : {}),
+    Origin: BASE_URL,
+    'X-Atoms-Workbench': '1',
+    ...extra,
+  });
 
   try {
     await waitForServer(child, getLogs, EXTERNAL_URL ? 15000 : 25000);
@@ -106,7 +131,17 @@ async function main() {
     assert.equal(homeRes.status, 200);
     const homeHtml = await homeRes.text();
     assert.match(homeHtml, /Mini Atoms/);
-    console.log('2. GET / passed');
+    sessionCookie = extractCookieValue(homeRes, 'atoms_sid');
+
+    const initProjectsRes = await fetch(`${BASE_URL}/api/projects`, {
+      headers: sessionCookie ? { Cookie: sessionCookie } : {},
+    });
+    assert.equal(initProjectsRes.status, 200);
+    if (!sessionCookie) {
+      sessionCookie = extractCookieValue(initProjectsRes, 'atoms_sid');
+    }
+    assert.ok(sessionCookie.startsWith('atoms_sid='), 'Expected signed atoms_sid cookie');
+    console.log('2. GET / & atoms_sid cookie minting passed');
 
     // 1b. GET /api/health
     const healthRes = await fetch(`${BASE_URL}/api/health`);
@@ -125,7 +160,7 @@ async function main() {
     // 3. POST /api/projects
     const createRes = await fetch(`${BASE_URL}/api/projects`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: wbHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ title: '端到端活动站', slug: `e2e-event-hub${SUFFIX}` }),
     });
     assert.equal(createRes.status, 201);
@@ -137,7 +172,7 @@ async function main() {
     // 4. POST /api/projects/:id/start (SSE)
     const startRes = await fetch(`${BASE_URL}/api/projects/${project.id}/start`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: wbHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({
         idea: '做一个科技沙龙活动报名与签到管理系统，支持账号登录和 Pro 会员导出',
         model: 'mock-default',
@@ -151,7 +186,7 @@ async function main() {
     // 5. POST /api/projects/:id/confirm (Race Mode)
     const confirmRes = await fetch(`${BASE_URL}/api/projects/${project.id}/confirm`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: wbHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ mode: 'race', model: 'mock-default' }),
     });
     const confirmEvents = await readSseEvents(confirmRes);
@@ -162,12 +197,13 @@ async function main() {
     // 5b. Unselected Race Mode guardrails: publish/iterate must return 409, /s/:slug stays 404
     const blockedPubRes = await fetch(`${BASE_URL}/api/projects/${project.id}/publish`, {
       method: 'POST',
+      headers: wbHeaders(),
     });
     assert.equal(blockedPubRes.status, 409);
 
     const blockedIterRes = await fetch(`${BASE_URL}/api/projects/${project.id}/iterate`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: wbHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ instruction: '主色调改成深蓝色' }),
     });
     assert.equal(blockedIterRes.status, 409);
@@ -177,7 +213,7 @@ async function main() {
 
     const badBranchRes = await fetch(`${BASE_URL}/api/projects/${project.id}/select-branch`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: wbHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ branchId: 'branch-unknown' }),
     });
     assert.equal(badBranchRes.status, 400);
@@ -186,7 +222,7 @@ async function main() {
     // 6. POST /api/projects/:id/select-branch
     const branchRes = await fetch(`${BASE_URL}/api/projects/${project.id}/select-branch`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: wbHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ branchId: 'branch-b' }),
     });
     assert.equal(branchRes.status, 200);
@@ -197,6 +233,7 @@ async function main() {
     // 7. POST /api/projects/:id/publish
     const pub1Res = await fetch(`${BASE_URL}/api/projects/${project.id}/publish`, {
       method: 'POST',
+      headers: wbHeaders(),
     });
     assert.equal(pub1Res.status, 200);
     const pub1Json = await pub1Res.json();
@@ -209,6 +246,10 @@ async function main() {
     const siteRes = await fetch(`${BASE_URL}/s/${project.slug}`);
     assert.equal(siteRes.status, 200);
     assert.match(siteRes.headers.get('content-type') || '', /text\/html/);
+    const siteCsp = siteRes.headers.get('content-security-policy') || '';
+    assert.ok(siteCsp.includes('/api/cloud/'), 'Expected /s/[slug] CSP connect-src prefix');
+    assert.ok(siteCsp.includes("frame-ancestors 'self'"), 'Expected /s/[slug] CSP frame-ancestors');
+    assert.ok(siteCsp.includes("object-src 'none'"), 'Expected /s/[slug] CSP object-src none');
     const siteHtml = await siteRes.text();
     assert.match(siteHtml, /<title>.*<\/title>/);
     assert.match(siteHtml, /property="og:title"/);
@@ -312,7 +353,10 @@ async function main() {
 
     const completeRes = await fetch(`${BASE_URL}/api/cloud/mock-checkout/complete`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
       body: JSON.stringify({
         sessionId: checkoutUrl.searchParams.get('sessionId'),
         projectId: checkoutUrl.searchParams.get('projectId'),
@@ -331,14 +375,18 @@ async function main() {
     console.log('12. Billing checkout + webhook + Pro upgrade passed');
 
     // 12. Workbench Cloud Data panel endpoint & ZIP export
-    const cloudPanelRes = await fetch(`${BASE_URL}/api/projects/${project.id}/cloud`);
+    const cloudPanelRes = await fetch(`${BASE_URL}/api/projects/${project.id}/cloud`, {
+      headers: wbHeaders(),
+    });
     assert.equal(cloudPanelRes.status, 200);
     const cloudPanelJson = await cloudPanelRes.json();
     assert.equal(cloudPanelJson.users.length, 1);
     assert.equal(cloudPanelJson.users[0].plan, 'pro');
     assert.equal(cloudPanelJson.records.length, 1);
 
-    const zipRes = await fetch(`${BASE_URL}/api/projects/${project.id}/export`);
+    const zipRes = await fetch(`${BASE_URL}/api/projects/${project.id}/export`, {
+      headers: wbHeaders(),
+    });
     assert.equal(zipRes.status, 200);
     assert.match(zipRes.headers.get('content-type') || '', /application\/zip/);
     const zipBytes = Buffer.from(await zipRes.arrayBuffer());
@@ -348,7 +396,7 @@ async function main() {
     // 13. Iterate + republish v2 + verify historical data preserved
     const iterRes = await fetch(`${BASE_URL}/api/projects/${project.id}/iterate`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: wbHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({
         instruction: '把主色调改成深蓝色，并增加导出 CSV 按钮',
         model: 'mock-default',
@@ -359,6 +407,7 @@ async function main() {
 
     const pub2Res = await fetch(`${BASE_URL}/api/projects/${project.id}/publish`, {
       method: 'POST',
+      headers: wbHeaders(),
     });
     assert.equal(pub2Res.status, 200);
     const pub2Json = await pub2Res.json();
@@ -379,7 +428,7 @@ async function main() {
     // 14. Interleaved Project B (InkVault) + return to Project A Round 2 iteration
     const createBRes = await fetch(`${BASE_URL}/api/projects`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: wbHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ title: 'InkVault 笔记站', slug: `e2e-inkvault${SUFFIX}` }),
     });
     assert.equal(createBRes.status, 201);
@@ -388,7 +437,7 @@ async function main() {
 
     const startBRes = await fetch(`${BASE_URL}/api/projects/${projB.id}/start`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: wbHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({
         idea: '做一个支持账号隔离、标签搜索与 Pro 会员高级导出的云端个人笔记站。',
         model: 'mock-default',
@@ -398,7 +447,7 @@ async function main() {
 
     const confirmBRes = await fetch(`${BASE_URL}/api/projects/${projB.id}/confirm`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: wbHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ mode: 'linear', model: 'mock-default' }),
     });
     await readSseEvents(confirmBRes);
@@ -406,7 +455,7 @@ async function main() {
     // Switch back to Project A and run Round 2 ("将主色调调整为深蓝色")
     const iterA2Res = await fetch(`${BASE_URL}/api/projects/${project.id}/iterate`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: wbHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({
         instruction: '将主色调调整为深蓝色',
         model: 'mock-default',
@@ -415,7 +464,9 @@ async function main() {
     const iterA2Events = await readSseEvents(iterA2Res);
     assert.ok(iterA2Events.some((e) => e.type === 'build_result' && e.payload.ok === true));
 
-    const snapA2Res = await fetch(`${BASE_URL}/api/projects/${project.id}`);
+    const snapA2Res = await fetch(`${BASE_URL}/api/projects/${project.id}`, {
+      headers: wbHeaders(),
+    });
     assert.equal(snapA2Res.status, 200);
     const snapA2Json = await snapA2Res.json();
     const appA2 = snapA2Json.project.draftFiles['src/App.tsx'];
@@ -428,6 +479,7 @@ async function main() {
 
     const pub3Res = await fetch(`${BASE_URL}/api/projects/${project.id}/publish`, {
       method: 'POST',
+      headers: wbHeaders(),
     });
     assert.equal(pub3Res.status, 200);
     const pub3Json = await pub3Res.json();
@@ -457,7 +509,7 @@ async function main() {
 
     const restartARes = await fetch(`${BASE_URL}/api/projects/${project.id}/start`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: wbHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({
         idea: '换一个新想法：做一个独立顾问轻量 CRM 客户跟进台，支持线索录入与跟进',
         model: 'mock-default',
@@ -467,7 +519,9 @@ async function main() {
     assert.ok(restartAEvents.some((e) => e.type === 'plan_ready'));
     assert.ok(!restartAEvents.some((e) => e.type === 'file_write'));
 
-    const pendingSnapRes = await fetch(`${BASE_URL}/api/projects/${project.id}`);
+    const pendingSnapRes = await fetch(`${BASE_URL}/api/projects/${project.id}`, {
+      headers: wbHeaders(),
+    });
     assert.equal(pendingSnapRes.status, 200);
     const pendingSnapJson = await pendingSnapRes.json();
     assert.equal(pendingSnapJson.project.status, 'awaiting_confirmation');
@@ -481,17 +535,20 @@ async function main() {
 
     const gateIterRes = await fetch(`${BASE_URL}/api/projects/${project.id}/iterate`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: wbHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ instruction: '主色调改成深蓝色' }),
     });
     assert.equal(gateIterRes.status, 409);
 
     const gatePubRes = await fetch(`${BASE_URL}/api/projects/${project.id}/publish`, {
       method: 'POST',
+      headers: wbHeaders(),
     });
     assert.equal(gatePubRes.status, 409);
 
-    const pendingSnapAfterRes = await fetch(`${BASE_URL}/api/projects/${project.id}`);
+    const pendingSnapAfterRes = await fetch(`${BASE_URL}/api/projects/${project.id}`, {
+      headers: wbHeaders(),
+    });
     const pendingSnapAfterJson = await pendingSnapAfterRes.json();
     assert.equal(pendingSnapAfterJson.project.status, 'awaiting_confirmation');
     assert.equal(pendingSnapAfterJson.project.publishedVersion, 3);
@@ -515,7 +572,7 @@ async function main() {
     // Explicit confirm restores Alex build, iteration, and publish
     const confirmNewARes = await fetch(`${BASE_URL}/api/projects/${project.id}/confirm`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: wbHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ mode: 'linear', model: 'mock-default' }),
     });
     const confirmNewAEvents = await readSseEvents(confirmNewARes);
@@ -526,7 +583,7 @@ async function main() {
 
     const iterAfterGateRes = await fetch(`${BASE_URL}/api/projects/${project.id}/iterate`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: wbHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({
         instruction: '主色调改成深蓝色',
         model: 'mock-default',
@@ -539,6 +596,7 @@ async function main() {
 
     const pub4Res = await fetch(`${BASE_URL}/api/projects/${project.id}/publish`, {
       method: 'POST',
+      headers: wbHeaders(),
     });
     assert.equal(pub4Res.status, 200);
     const pub4Json = await pub4Res.json();
@@ -561,7 +619,7 @@ async function main() {
     // 17. Project rename, inline source edit/recompile, and cascade delete on Project B
     const renameBRes = await fetch(`${BASE_URL}/api/projects/${projB.id}`, {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
+      headers: wbHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ title: 'InkVault 重命名验收版' }),
     });
     assert.equal(renameBRes.status, 200);
@@ -570,7 +628,7 @@ async function main() {
 
     const putFilesBRes = await fetch(`${BASE_URL}/api/projects/${projB.id}/files`, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
+      headers: wbHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({
         files: {
           'src/App.tsx':
@@ -585,18 +643,126 @@ async function main() {
 
     const delBRes = await fetch(`${BASE_URL}/api/projects/${projB.id}`, {
       method: 'DELETE',
+      headers: wbHeaders(),
     });
     assert.equal(delBRes.status, 200);
 
-    const getBDeletedRes = await fetch(`${BASE_URL}/api/projects/${projB.id}`);
+    const getBDeletedRes = await fetch(`${BASE_URL}/api/projects/${projB.id}`, {
+      headers: wbHeaders(),
+    });
     assert.equal(getBDeletedRes.status, 404);
 
     // Project A remains intact after deleting Project B
-    const snapAFinalRes = await fetch(`${BASE_URL}/api/projects/${project.id}`);
+    const snapAFinalRes = await fetch(`${BASE_URL}/api/projects/${project.id}`, {
+      headers: wbHeaders(),
+    });
     assert.equal(snapAFinalRes.status, 200);
     const snapAFinalJson = await snapAFinalRes.json();
     assert.equal(snapAFinalJson.project.publishedVersion, 4);
     console.log('17. Project rename, inline source recompile & cascade delete passed');
+
+    // 18. Security assertions:
+    // (a) Delete without cookie -> 403
+    const noCookieDelRes = await fetch(`${BASE_URL}/api/projects/${project.id}`, {
+      method: 'DELETE',
+      headers: {
+        Origin: BASE_URL,
+        'X-Atoms-Workbench': '1',
+      },
+    });
+    assert.equal(noCookieDelRes.status, 403);
+
+    // (b) Write request without X-Atoms-Workbench header -> 403; /s/ Referer -> 403
+    const noHeaderWriteRes = await fetch(`${BASE_URL}/api/projects`, {
+      method: 'POST',
+      headers: {
+        Cookie: sessionCookie,
+        Origin: BASE_URL,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ title: 'Should Be Blocked' }),
+    });
+    assert.equal(noHeaderWriteRes.status, 403);
+
+    const pubRefererWriteRes = await fetch(`${BASE_URL}/api/projects`, {
+      method: 'POST',
+      headers: wbHeaders({
+        'Content-Type': 'application/json',
+        Referer: `${BASE_URL}/s/app-otqlo`,
+      }),
+      body: JSON.stringify({ title: 'Blocked Published Referer' }),
+    });
+    assert.equal(pubRefererWriteRes.status, 403);
+
+    // (c) AI proxy rate limit -> 429 (create short-lived AI project & burst IP limit)
+    const createAiRes = await fetch(`${BASE_URL}/api/projects`, {
+      method: 'POST',
+      headers: wbHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ title: 'AI Smoke Guard', slug: `e2e-ai-guard${SUFFIX}` }),
+    });
+    assert.equal(createAiRes.status, 201);
+    const { project: aiProj } = await createAiRes.json();
+    createdIds.push(aiProj.id);
+
+    const aiStartEvents = await readSseEvents(
+      await fetch(`${BASE_URL}/api/projects/${aiProj.id}/start`, {
+        method: 'POST',
+        headers: wbHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ idea: '做一个 AI 智能问答备忘应用', model: 'mock-default' }),
+      })
+    );
+    const aiPlanEv = aiStartEvents.find((e) => e.type === 'plan_ready');
+    assert.ok(aiPlanEv?.payload, 'Expected plan_ready for AI guard project');
+    await readSseEvents(
+      await fetch(`${BASE_URL}/api/projects/${aiProj.id}/confirm`, {
+        method: 'POST',
+        headers: wbHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({
+          mode: 'linear',
+          model: 'mock-default',
+          planPatch: {
+            ...aiPlanEv.payload,
+            capabilities: ['db', 'auth', 'billing', 'ai'],
+          },
+        }),
+      })
+    );
+
+    const aiRegRes = await fetch(`${BASE_URL}/api/cloud/${aiProj.id}/auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: 'aiguard@example.com',
+        password: 'password123',
+        name: 'AI Guard',
+      }),
+    });
+    assert.equal(aiRegRes.status, 201);
+    const { token: aiToken } = await aiRegRes.json();
+
+    const ipLimit = Math.max(
+      1,
+      Number.parseInt(process.env.AI_RATE_LIMIT_IP_PER_MIN || '10', 10) || 10
+    );
+    const burstStatuses = await Promise.all(
+      Array.from({ length: ipLimit + 3 }, (_, idx) =>
+        fetch(`${BASE_URL}/api/cloud/${aiProj.id}/ai`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${aiToken}`,
+          },
+          body: JSON.stringify({ prompt: `Reply OK ${idx}`, maxTokens: 8 }),
+        }).then((r) => ({ status: r.status, retryAfter: r.headers.get('retry-after') }))
+      )
+    );
+    const rateLimitedHits = burstStatuses.filter((r) => r.status === 429);
+    assert.ok(
+      rateLimitedHits.length >= 1,
+      `Expected at least one 429 from AI burst, got: ${JSON.stringify(burstStatuses.map((s) => s.status))}`
+    );
+    assert.ok(rateLimitedHits[0].retryAfter, 'Expected Retry-After header on 429 response');
+    console.log('18. Security checks (403 no-cookie delete, 403 anti-spoofing headers, 429 AI limit) passed');
 
     console.log('\nALL E2E HTTP SMOKE ASSERTIONS PASSED!');
   } catch (err) {
@@ -605,9 +771,10 @@ async function main() {
   } finally {
     if (EXTERNAL_URL) {
       for (const id of createdIds) {
-        await fetch(`${BASE_URL}/api/projects/${id}`, { method: 'DELETE' }).catch(
-          () => undefined
-        );
+        await fetch(`${BASE_URL}/api/projects/${id}`, {
+          method: 'DELETE',
+          headers: wbHeaders(),
+        }).catch(() => undefined);
       }
     }
     if (child) {

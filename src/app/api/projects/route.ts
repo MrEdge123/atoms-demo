@@ -1,11 +1,42 @@
 import { NextResponse } from 'next/server';
 import { getContainer } from '@/container';
+import {
+  assertNotFromPublishedSiteReferer,
+  assertWorkbenchWriteRequest,
+  getVerifiedWorkbenchSid,
+  requireWorkbenchSession,
+} from '@/app/api/_security';
+import {
+  buildSessionCookieHeader,
+  mintSignedSessionToken,
+  shouldUseSecureCookie,
+} from '@/lib/workbench-session';
 
 export const dynamic = 'force-dynamic';
 
-export async function GET() {
+export async function GET(req: Request) {
+  const refererBlocked = assertNotFromPublishedSiteReferer(req);
+  if (refererBlocked) return refererBlocked;
+
   const c = await getContainer();
-  const projects = await c.repo.listAll();
+  const sid = await getVerifiedWorkbenchSid(req, c.authSecret);
+  if (!sid) {
+    const minted = await mintSignedSessionToken(c.authSecret);
+    return NextResponse.json(
+      { projects: [] },
+      {
+        headers: {
+          'Cache-Control': 'no-store',
+          'Set-Cookie': buildSessionCookieHeader(
+            minted.cookieValue,
+            shouldUseSecureCookie(req)
+          ),
+        },
+      }
+    );
+  }
+
+  const projects = await c.repo.listAll({ ownerSid: sid });
   const summaries = projects.map((project) => ({
     ...project,
     draftFiles: {},
@@ -20,6 +51,13 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
+  const c = await getContainer();
+  const writeBlocked = assertWorkbenchWriteRequest(req, c.apiBaseUrl);
+  if (writeBlocked) return writeBlocked;
+
+  const session = await requireWorkbenchSession(req, c.authSecret);
+  if (!session.ok) return session.response;
+
   const body = (await req.json().catch(() => ({}))) as {
     title?: string;
     slug?: string;
@@ -35,7 +73,10 @@ export async function POST(req: Request) {
     );
   }
 
-  const c = await getContainer();
-  const project = await c.repo.create({ title, slug: rawSlug });
+  const project = await c.repo.create({
+    title,
+    slug: rawSlug,
+    ownerSid: session.sid,
+  });
   return NextResponse.json({ project }, { status: 201 });
 }

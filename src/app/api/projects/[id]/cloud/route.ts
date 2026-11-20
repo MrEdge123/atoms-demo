@@ -1,5 +1,11 @@
 import { NextResponse } from 'next/server';
 import { getContainer } from '@/container';
+import {
+  assertNotFromPublishedSiteReferer,
+  assertProjectAccess,
+  assertWorkbenchWriteRequest,
+  requireWorkbenchSession,
+} from '@/app/api/_security';
 
 export const dynamic = 'force-dynamic';
 
@@ -7,12 +13,20 @@ export async function GET(
   req: Request,
   context: { params: Promise<{ id: string }> }
 ) {
+  const refererBlocked = assertNotFromPublishedSiteReferer(req);
+  if (refererBlocked) return refererBlocked;
+
   const { id } = await context.params;
   const c = await getContainer();
+  const session = await requireWorkbenchSession(req, c.authSecret);
+  if (!session.ok) return session.response;
+
   const project = await c.repo.getById(id);
   if (!project) {
     return NextResponse.json({ error: 'Project not found' }, { status: 404 });
   }
+  const accessBlocked = assertProjectAccess(project, session.sid, 'cloud');
+  if (accessBlocked) return accessBlocked;
 
   const url = new URL(req.url);
   const requestedCollection = url.searchParams.get('collection');
@@ -57,7 +71,21 @@ export async function DELETE(
   req: Request,
   context: { params: Promise<{ id: string }> }
 ) {
+  const c = await getContainer();
+  const writeBlocked = assertWorkbenchWriteRequest(req, c.apiBaseUrl);
+  if (writeBlocked) return writeBlocked;
+
+  const session = await requireWorkbenchSession(req, c.authSecret);
+  if (!session.ok) return session.response;
+
   const { id } = await context.params;
+  const existing = await c.repo.getById(id);
+  if (!existing) {
+    return NextResponse.json({ error: 'Project not found' }, { status: 404 });
+  }
+  const accessBlocked = assertProjectAccess(existing, session.sid, 'cloud');
+  if (accessBlocked) return accessBlocked;
+
   const url = new URL(req.url);
   const collection = url.searchParams.get('collection');
   const recordId = url.searchParams.get('recordId');
@@ -70,7 +98,6 @@ export async function DELETE(
   }
 
   try {
-    const c = await getContainer();
     await c.appCloud.db.remove(id, collection, recordId);
     return NextResponse.json({ ok: true });
   } catch (err) {

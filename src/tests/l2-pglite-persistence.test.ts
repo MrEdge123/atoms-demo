@@ -2,7 +2,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
+import { PostgresAppCloudRuntime } from '@/adapters/app-cloud/postgres';
 import { signHmacSha256 } from '@/adapters/app-cloud/crypto';
+import { PGliteSqlClient } from '@/adapters/storage/sql-client';
 import { createContainer } from '@/container';
 import type { AgentEvent } from '@/domain';
 
@@ -302,10 +304,50 @@ describe('L2: Real PGlite persistence across container restarts and iterative re
       expect(reloaded?.plan?.designSystem?.colorMode).toBe('light');
       expect(reloaded?.plan?.designSystem?.palette.background).toBe('#F8F9FB');
       expect(reloaded?.raceBranches).toHaveLength(0);
+      const reloadedEvents = await c2.repo.listEvents(proj.id);
+      expect(
+        reloadedEvents.some(
+          (ev) =>
+            ev.type === 'thought' &&
+            ev.branchId === 'branch-b' &&
+            JSON.stringify(ev.payload).includes('作为当前草稿主分支')
+        )
+      ).toBe(true);
 
       await c2.close();
     } finally {
       fs.rmSync(tempRaceDir, { recursive: true, force: true });
     }
   }, 25000);
+
+  it('rolls back billing_orders insert inside SQL transaction when user upgrade fails', async () => {
+    const tempTxDir = fs.mkdtempSync(path.join(os.tmpdir(), 'atoms-l2-tx-'));
+    const sql = new PGliteSqlClient(path.join(tempTxDir, 'db'));
+    try {
+      const runtime = new PostgresAppCloudRuntime({
+        sql,
+        authSecret: 'tx-rollback-secret',
+      });
+      const rawBody = JSON.stringify({
+        orderId: 'ord_missing_user_rollback',
+        projectId: 'proj_any',
+        userId: 'usr_nonexistent',
+        plan: 'pro',
+      });
+      const signature = signHmacSha256(rawBody, 'tx-rollback-secret');
+
+      await expect(
+        runtime.billing.handleWebhook({ rawBody, signature })
+      ).rejects.toThrow(/not found/);
+
+      const countRes = await sql.query<{ cnt: string | number }>(
+        'SELECT COUNT(*)::int AS cnt FROM billing_orders WHERE order_id = $1',
+        ['ord_missing_user_rollback']
+      );
+      expect(Number(countRes.rows[0]?.cnt ?? -1)).toBe(0);
+    } finally {
+      await sql.close();
+      fs.rmSync(tempTxDir, { recursive: true, force: true });
+    }
+  }, 20000);
 });

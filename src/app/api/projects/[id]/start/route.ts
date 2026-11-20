@@ -1,6 +1,11 @@
 import { NextResponse } from 'next/server';
 import { getContainer } from '@/container';
 import { styleThemeSchema } from '@/core';
+import {
+  assertProjectAccess,
+  assertWorkbenchWriteRequest,
+  requireWorkbenchSession,
+} from '@/app/api/_security';
 import { createSseResponse } from '@/app/api/_utils';
 import type { StyleThemeSpec } from '@/domain';
 
@@ -11,7 +16,21 @@ export async function POST(
   req: Request,
   context: { params: Promise<{ id: string }> }
 ) {
+  const c = await getContainer();
+  const writeBlocked = assertWorkbenchWriteRequest(req, c.apiBaseUrl);
+  if (writeBlocked) return writeBlocked;
+
+  const session = await requireWorkbenchSession(req, c.authSecret);
+  if (!session.ok) return session.response;
+
   const { id } = await context.params;
+  const project = await c.repo.getById(id);
+  if (!project) {
+    return NextResponse.json({ error: 'Project not found' }, { status: 404 });
+  }
+  const accessBlocked = assertProjectAccess(project, session.sid, 'write');
+  if (accessBlocked) return accessBlocked;
+
   const body = (await req.json().catch(() => ({}))) as {
     idea?: string;
     model?: string;
@@ -37,13 +56,13 @@ export async function POST(
     validatedTheme = parsedTheme.data;
   }
 
-  const c = await getContainer();
-  const project = await c.repo.getById(id);
-  if (!project) {
-    return NextResponse.json({ error: 'Project not found' }, { status: 404 });
-  }
-
   return createSseResponse(
-    c.workflow.start(id, idea, { model: body.model, styleTheme: validatedTheme })
+    (signal) =>
+      c.workflow.start(id, idea, {
+        model: body.model,
+        styleTheme: validatedTheme,
+        signal,
+      }),
+    req
   );
 }

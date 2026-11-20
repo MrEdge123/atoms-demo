@@ -2,6 +2,11 @@ import { NextResponse } from 'next/server';
 import QRCode from 'qrcode';
 import { getContainer } from '@/container';
 import { getMutationBlockReason } from '@/core';
+import {
+  assertProjectAccess,
+  assertWorkbenchWriteRequest,
+  requireWorkbenchSession,
+} from '@/app/api/_security';
 import { resolvePublicBaseUrl } from '@/app/api/_utils';
 
 export const dynamic = 'force-dynamic';
@@ -13,10 +18,19 @@ export async function POST(
   const { id } = await context.params;
   try {
     const c = await getContainer();
+    const writeBlocked = assertWorkbenchWriteRequest(req, c.apiBaseUrl);
+    if (writeBlocked) return writeBlocked;
+
+    const session = await requireWorkbenchSession(req, c.authSecret);
+    if (!session.ok) return session.response;
+
     const project = await c.repo.getById(id);
     if (!project) {
       return NextResponse.json({ error: 'Project not found' }, { status: 404 });
     }
+    const accessBlocked = assertProjectAccess(project, session.sid, 'write');
+    if (accessBlocked) return accessBlocked;
+
     const blockReason = getMutationBlockReason(project, 'publish');
     if (blockReason) {
       return NextResponse.json({ error: blockReason }, { status: 409 });

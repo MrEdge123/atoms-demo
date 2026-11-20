@@ -1,6 +1,16 @@
 import type { AppRecord, AppUser } from '../domain';
 
 /**
+ * Thrown when an authenticated user tries to modify or delete a record owned by another user.
+ */
+export class CloudRecordForbiddenError extends Error {
+  constructor(message = 'Permission denied for this record') {
+    super(message);
+    this.name = 'CloudRecordForbiddenError';
+  }
+}
+
+/**
  * Collection-based JSON document store scoped strictly by projectId.
  */
 export interface AppDbPort {
@@ -11,8 +21,14 @@ export interface AppDbPort {
   list(
     projectId: string,
     collection: string,
-    filter?: { ownerUserId?: string }
+    filter?: { ownerUserId?: string; limit?: number; offset?: number }
   ): Promise<AppRecord[]>;
+
+  getById(
+    projectId: string,
+    collection: string,
+    id: string
+  ): Promise<AppRecord | null>;
 
   create(
     projectId: string,
@@ -25,10 +41,16 @@ export interface AppDbPort {
     projectId: string,
     collection: string,
     id: string,
-    patch: Record<string, unknown>
+    patch: Record<string, unknown>,
+    opts?: { expectedOwnerUserId?: string; allowUnownedPublic?: boolean }
   ): Promise<AppRecord>;
 
-  remove(projectId: string, collection: string, id: string): Promise<void>;
+  remove(
+    projectId: string,
+    collection: string,
+    id: string,
+    opts?: { expectedOwnerUserId?: string; allowUnownedPublic?: boolean }
+  ): Promise<void>;
 }
 
 /**
@@ -88,7 +110,11 @@ export interface AppBillingPort {
  * AI completions without exposing API keys in client code.
  */
 export interface AppAiProxyPort {
-  complete(projectId: string, prompt: string): Promise<{ text: string }>;
+  complete(
+    projectId: string,
+    prompt: string,
+    opts?: { maxTokens?: number; abortSignal?: AbortSignal }
+  ): Promise<{ text: string }>;
 }
 
 /**

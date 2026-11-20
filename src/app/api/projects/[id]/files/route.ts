@@ -2,6 +2,12 @@ import { NextResponse } from 'next/server';
 import { getContainer } from '@/container';
 import { getMutationBlockReason, normalizePath } from '@/core';
 import type { VirtualFS } from '@/domain';
+import {
+  assertProjectAccess,
+  assertWorkbenchWriteRequest,
+  buildSandboxCspHeader,
+  requireWorkbenchSession,
+} from '@/app/api/_security';
 import { resolvePublicBaseUrl } from '@/app/api/_utils';
 
 export const dynamic = 'force-dynamic';
@@ -12,7 +18,21 @@ export async function PUT(
   req: Request,
   context: { params: Promise<{ id: string }> }
 ) {
+  const c = await getContainer();
+  const writeBlocked = assertWorkbenchWriteRequest(req, c.apiBaseUrl);
+  if (writeBlocked) return writeBlocked;
+
+  const session = await requireWorkbenchSession(req, c.authSecret);
+  if (!session.ok) return session.response;
+
   const { id } = await context.params;
+  const project = await c.repo.getById(id);
+  if (!project) {
+    return NextResponse.json({ error: 'Project not found' }, { status: 404 });
+  }
+  const accessBlocked = assertProjectAccess(project, session.sid, 'write');
+  if (accessBlocked) return accessBlocked;
+
   const body = (await req.json().catch(() => ({}))) as {
     files?: unknown;
   };
@@ -63,12 +83,6 @@ export async function PUT(
     );
   }
 
-  const c = await getContainer();
-  const project = await c.repo.getById(id);
-  if (!project) {
-    return NextResponse.json({ error: 'Project not found' }, { status: 404 });
-  }
-
   const blockReason = getMutationBlockReason(project, 'iterate');
   if (blockReason) {
     return NextResponse.json({ error: blockReason }, { status: 409 });
@@ -111,10 +125,17 @@ export async function PUT(
   });
 
   const updatedProject = await c.repo.getById(id);
-  return NextResponse.json({
-    project: updatedProject,
-    ok: artifact.ok,
-    previewHtml: artifact.ok ? artifact.html : null,
-    compileErrors: artifact.ok ? [] : artifact.errors,
-  });
+  return NextResponse.json(
+    {
+      project: updatedProject,
+      ok: artifact.ok,
+      previewHtml: artifact.ok ? artifact.html : null,
+      compileErrors: artifact.ok ? [] : artifact.errors,
+    },
+    {
+      headers: {
+        'Content-Security-Policy': buildSandboxCspHeader(origin),
+      },
+    }
+  );
 }

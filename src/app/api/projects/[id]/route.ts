@@ -2,6 +2,14 @@ import { NextResponse } from 'next/server';
 import { getContainer } from '@/container';
 import { isBuildingInProgress, isPlanningInProgress } from '@/core';
 import {
+  assertNotFromPublishedSiteReferer,
+  assertProjectAccess,
+  assertWorkbenchWriteRequest,
+  buildSandboxCspHeader,
+  getVerifiedWorkbenchSid,
+  requireWorkbenchSession,
+} from '@/app/api/_security';
+import {
   compilePreviewSnapshot,
   resolvePublicBaseUrl,
 } from '@/app/api/_utils';
@@ -12,12 +20,19 @@ export async function GET(
   req: Request,
   context: { params: Promise<{ id: string }> }
 ) {
+  const refererBlocked = assertNotFromPublishedSiteReferer(req);
+  if (refererBlocked) return refererBlocked;
+
   const { id } = await context.params;
   const c = await getContainer();
+  const sid = await getVerifiedWorkbenchSid(req, c.authSecret);
   const project = await c.repo.getById(id);
   if (!project) {
     return NextResponse.json({ error: 'Project not found' }, { status: 404 });
   }
+
+  const accessBlocked = assertProjectAccess(project, sid, 'read');
+  if (accessBlocked) return accessBlocked;
 
   const origin = resolvePublicBaseUrl(req, c.apiBaseUrl);
   const [events, snapshot] = await Promise.all([
@@ -39,7 +54,12 @@ export async function GET(
       publicUrl:
         project.publishedVersion > 0 ? `${origin}/s/${project.slug}` : null,
     },
-    { headers: { 'Cache-Control': 'no-store' } }
+    {
+      headers: {
+        'Cache-Control': 'no-store',
+        'Content-Security-Policy': buildSandboxCspHeader(origin),
+      },
+    }
   );
 }
 
@@ -47,7 +67,21 @@ export async function PATCH(
   req: Request,
   context: { params: Promise<{ id: string }> }
 ) {
+  const c = await getContainer();
+  const writeBlocked = assertWorkbenchWriteRequest(req, c.apiBaseUrl);
+  if (writeBlocked) return writeBlocked;
+
+  const session = await requireWorkbenchSession(req, c.authSecret);
+  if (!session.ok) return session.response;
+
   const { id } = await context.params;
+  const existing = await c.repo.getById(id);
+  if (!existing) {
+    return NextResponse.json({ error: 'Project not found' }, { status: 404 });
+  }
+  const accessBlocked = assertProjectAccess(existing, session.sid, 'write');
+  if (accessBlocked) return accessBlocked;
+
   const body = (await req.json().catch(() => ({}))) as { title?: unknown };
   const title = typeof body.title === 'string' ? body.title.trim() : '';
 
@@ -56,12 +90,6 @@ export async function PATCH(
       { error: '项目名称需为 1 至 80 个字符' },
       { status: 400 }
     );
-  }
-
-  const c = await getContainer();
-  const existing = await c.repo.getById(id);
-  if (!existing) {
-    return NextResponse.json({ error: 'Project not found' }, { status: 404 });
   }
 
   try {
@@ -74,15 +102,23 @@ export async function PATCH(
 }
 
 export async function DELETE(
-  _req: Request,
+  req: Request,
   context: { params: Promise<{ id: string }> }
 ) {
-  const { id } = await context.params;
   const c = await getContainer();
+  const writeBlocked = assertWorkbenchWriteRequest(req, c.apiBaseUrl);
+  if (writeBlocked) return writeBlocked;
+
+  const session = await requireWorkbenchSession(req, c.authSecret);
+  if (!session.ok) return session.response;
+
+  const { id } = await context.params;
   const existing = await c.repo.getById(id);
   if (!existing) {
     return NextResponse.json({ error: 'Project not found' }, { status: 404 });
   }
+  const accessBlocked = assertProjectAccess(existing, session.sid, 'write');
+  if (accessBlocked) return accessBlocked;
 
   if (isPlanningInProgress(existing) || isBuildingInProgress(existing)) {
     return NextResponse.json(

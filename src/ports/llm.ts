@@ -28,11 +28,14 @@ export interface LLMProvider {
     prompt: string;
     schema: SchemaLike<T>;
     model?: string;
+    abortSignal?: AbortSignal;
   }): Promise<T>;
 
   streamText(input: {
     system: string;
     prompt: string;
     model?: string;
+    maxTokens?: number;
+    abortSignal?: AbortSignal;
   }): AsyncIterable<string>;
 }

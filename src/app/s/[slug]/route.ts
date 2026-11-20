@@ -1,4 +1,6 @@
 import { getContainer } from '@/container';
+import { buildSandboxCspHeader } from '@/app/api/_security';
+import { resolvePublicBaseUrl } from '@/app/api/_utils';
 
 export const dynamic = 'force-dynamic';
 
@@ -12,11 +14,13 @@ function escapeHtml(text: string): string {
 }
 
 export async function GET(
-  _req: Request,
+  req: Request,
   context: { params: Promise<{ slug: string }> }
 ) {
   const { slug } = await context.params;
   const c = await getContainer();
+  const origin = resolvePublicBaseUrl(req, c.apiBaseUrl);
+  const cspHeader = buildSandboxCspHeader(origin);
   const project = await c.repo.getBySlug(slug);
 
   if (!project || !project.publishedHtml) {
@@ -48,6 +52,7 @@ export async function GET(
       headers: {
         'Content-Type': 'text/html; charset=utf-8',
         'Cache-Control': 'no-store',
+        'Content-Security-Policy': cspHeader,
       },
     });
   }
@@ -57,6 +62,7 @@ export async function GET(
     headers: {
       'Content-Type': 'text/html; charset=utf-8',
       'Cache-Control': 'no-store',
+      'Content-Security-Policy': cspHeader,
     },
   });
 }

@@ -70,6 +70,7 @@ import { LauncherView, type DemoIdeaPreset } from './atoms/LauncherView';
 import { SharePublishPopover } from './atoms/SharePublishPopover';
 import { StyleThemeModal } from './atoms/StyleThemeModal';
 import { TimelineStream } from './atoms/TimelineStream';
+import { workbenchFetch } from '@/lib/workbench-fetch';
 
 const CUSTOM_THEMES_STORAGE_KEY = 'atoms_custom_style_themes_v1';
 
@@ -416,7 +417,7 @@ export function Workbench() {
         return { data: null, superseded: true };
       }
       const reqSeq = ++snapshotSeqRef.current;
-      const res = await fetch(`/api/projects/${projectId}`, {
+      const res = await workbenchFetch(`/api/projects/${projectId}`, {
         cache: 'no-store',
       });
       const staleAfterFetch = () =>
@@ -475,10 +476,10 @@ export function Workbench() {
       retryDepth = 0
     ): Promise<{ projects: Project[]; targetId: string | null }> => {
       const reqVersion = listVersionRef.current;
-      const projPromise = fetch('/api/projects', { cache: 'no-store' });
+      const projPromise = workbenchFetch('/api/projects', { cache: 'no-store' });
       const modelPromise = modelsLoadedRef.current
         ? null
-        : fetch('/api/models', { cache: 'no-store' });
+        : workbenchFetch('/api/models', { cache: 'no-store' });
       const [projRes, modelRes] = await Promise.all([projPromise, modelPromise]);
       if (modelRes && modelRes.ok) {
         modelsLoadedRef.current = true;
@@ -590,7 +591,7 @@ export function Workbench() {
   }
 
   async function createNewProject(title?: string): Promise<Project> {
-    const res = await fetch('/api/projects', {
+    const res = await workbenchFetch('/api/projects', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -648,7 +649,7 @@ export function Workbench() {
     const isCurrentProject = () =>
       !activeIdRef.current || activeIdRef.current === projectId;
     try {
-      const res = await fetch(`/api/projects/${projectId}/start`, {
+      const res = await workbenchFetch(`/api/projects/${projectId}/start`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -731,7 +732,7 @@ export function Workbench() {
     const isCurrentProject = () =>
       !activeIdRef.current || activeIdRef.current === targetId;
     try {
-      const res = await fetch(`/api/projects/${targetId}/confirm`, {
+      const res = await workbenchFetch(`/api/projects/${targetId}/confirm`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -783,7 +784,7 @@ export function Workbench() {
     setShareOpen(false);
     setBusyAction('正在切换所选方案...');
     try {
-      const res = await fetch(`/api/projects/${targetId}/select-branch`, {
+      const res = await workbenchFetch(`/api/projects/${targetId}/select-branch`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ branchId, runId: expectedRunId }),
@@ -822,7 +823,7 @@ export function Workbench() {
     const isCurrentProject = () =>
       !activeIdRef.current || activeIdRef.current === targetId;
     try {
-      const res = await fetch(`/api/projects/${targetId}/iterate`, {
+      const res = await workbenchFetch(`/api/projects/${targetId}/iterate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -863,7 +864,7 @@ export function Workbench() {
     setErrorMsg('');
     setBusyAction('正在构建并发布独立生产站点...');
     try {
-      const res = await fetch(`/api/projects/${targetId}/publish`, {
+      const res = await workbenchFetch(`/api/projects/${targetId}/publish`, {
         method: 'POST',
       });
       const data = (await res.json()) as {
@@ -920,7 +921,7 @@ export function Workbench() {
     if (!trimmed) return;
     setErrorMsg('');
     try {
-      const res = await fetch(`/api/projects/${projectId}`, {
+      const res = await workbenchFetch(`/api/projects/${projectId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ title: trimmed }),
@@ -947,7 +948,7 @@ export function Workbench() {
   async function handleDeleteProject(projectId: string) {
     setErrorMsg('');
     try {
-      const res = await fetch(`/api/projects/${projectId}`, {
+      const res = await workbenchFetch(`/api/projects/${projectId}`, {
         method: 'DELETE',
       });
       const data = (await res.json()) as { ok?: boolean; error?: string };
@@ -993,7 +994,7 @@ export function Workbench() {
     setCodeCompileErrors([]);
     try {
       const nextFiles = { ...draftFiles, [selectedFile]: codeDraft };
-      const res = await fetch(`/api/projects/${targetId}/files`, {
+      const res = await workbenchFetch(`/api/projects/${targetId}/files`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ files: nextFiles }),

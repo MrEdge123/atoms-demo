@@ -7,6 +7,7 @@ export type {
   SeoMetadata,
 } from './builder';
 
+export { CloudRecordForbiddenError } from './app-cloud';
 export type {
   AppAiProxyPort,
   AppAuthPort,

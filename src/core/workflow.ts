@@ -128,7 +128,7 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
   async *start(
     projectId: string,
     idea: string,
-    opts?: { model?: string; styleTheme?: StyleThemeSpec }
+    opts?: { model?: string; styleTheme?: StyleThemeSpec; signal?: AbortSignal }
   ): AsyncIterable<AgentEvent> {
     const runToken = this.acquireProjectLock(projectId);
     const started = Date.now();
@@ -175,6 +175,7 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
         ...irisPrompt,
         schema: researchOutputSchema,
         model: opts?.model,
+        abortSignal: opts?.signal,
       });
       console.log(
         `[Workflow] iris ready project=${projectId} model=${modelLabel} elapsed=${Date.now() - started}ms`
@@ -203,6 +204,7 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
         ...emmaPrompt,
         schema: productPlanSchema,
         model: opts?.model,
+        abortSignal: opts?.signal,
       });
 
       const resolvedDesignSystem = opts?.styleTheme
@@ -261,6 +263,7 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
       planPatch?: Partial<ProductPlan>;
       model?: string;
       mode?: 'linear' | 'race';
+      signal?: AbortSignal;
     }
   ): AsyncIterable<AgentEvent> {
     const runToken = this.acquireProjectLock(projectId);
@@ -367,6 +370,7 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
                 initialPrompt: prompt,
                 model: input?.model,
                 branchId: dir.branchId,
+                abortSignal: input?.signal,
                 onEvent: (ev) => {
                   buffered.push(ev);
                 },
@@ -387,6 +391,9 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
 
               return { branch, buffered };
             } catch (branchErr) {
+              if (input?.signal?.aborted) {
+                throw branchErr;
+              }
               const message =
                 branchErr instanceof Error ? branchErr.message : String(branchErr);
               buffered.push({
@@ -480,6 +487,7 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
         baseFiles: { 'DESIGN.md': designMd },
         initialPrompt: buildAlexGeneratePrompt({ plan: mergedPlan, designMd }),
         model: input?.model,
+        abortSignal: input?.signal,
         onEvent: (ev) => {
           buffered.push(ev);
         },
@@ -554,6 +562,15 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
       expectedRunId: opts?.runId ?? chosen.runId,
       files: chosen.files,
       designSystem: chosen.designSystem,
+      auditEvent: {
+        role: 'system',
+        branchId: chosen.branchId,
+        type: 'thought',
+        payload: {
+          message: `已选定 ${chosen.label} 作为当前草稿主分支`,
+        },
+        timestamp: new Date().toISOString(),
+      },
     });
     if (!updated) {
       throw new Error(
@@ -561,23 +578,13 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
       );
     }
 
-    const getSeq = await this.nextSeq(projectId);
-    await this.emitAndPersist(projectId, getSeq, {
-      role: 'system',
-      branchId: chosen.branchId,
-      type: 'thought',
-      payload: {
-        message: `已选定 ${chosen.label} 作为当前草稿主分支`,
-      },
-    });
-
     return updated;
   }
 
   async *iterate(
     projectId: string,
     instruction: string,
-    opts?: { model?: string }
+    opts?: { model?: string; signal?: AbortSignal }
   ): AsyncIterable<AgentEvent> {
     const runToken = this.acquireProjectLock(projectId);
     const started = Date.now();
@@ -628,6 +635,7 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
           instruction,
         }),
         model: opts?.model,
+        abortSignal: opts?.signal,
         onEvent: (ev) => {
           buffered.push(ev);
         },
@@ -737,6 +745,7 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
     initialPrompt: { system: string; prompt: string };
     model?: string;
     branchId?: string;
+    abortSignal?: AbortSignal;
     onEvent: (event: {
       role: AgentRole;
       type: AgentEvent['type'];
@@ -748,6 +757,7 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
       ...params.initialPrompt,
       schema: alexFilesOutputSchema,
       model: params.model,
+      abortSignal: params.abortSignal,
     });
 
     params.onEvent({
@@ -771,6 +781,11 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
     let round = 0;
 
     while (!artifact.ok && round < this.maxAutoFixRounds) {
+      if (params.abortSignal?.aborted) {
+        throw (
+          params.abortSignal.reason ?? new Error('Client disconnected')
+        );
+      }
       round += 1;
       params.onEvent({
         role: 'alex',
@@ -789,6 +804,7 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
         ...fixPrompt,
         schema: alexFilesOutputSchema,
         model: params.model,
+        abortSignal: params.abortSignal,
       });
 
       files = mergeVirtualFS(files, repaired.files, repaired.deletes);

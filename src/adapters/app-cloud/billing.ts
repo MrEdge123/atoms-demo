@@ -16,6 +16,14 @@ export interface BillingStore {
     plan: 'free' | 'pro';
     provider: string;
   }): Promise<boolean>;
+  /** Atomically record an order and upgrade user plan inside one transaction when supported. */
+  recordOrderAndSetUserPlan?(order: {
+    orderId: string;
+    projectId: string;
+    userId: string;
+    plan: 'free' | 'pro';
+    provider: string;
+  }): Promise<{ applied: boolean }>;
 }
 
 /**
@@ -99,16 +107,27 @@ export class MockBillingAdapter implements AppBillingPort {
     }
 
     const plan: 'free' | 'pro' = body.plan === 'free' ? 'free' : 'pro';
-    const isNew = await this.store.recordOrderIfNew({
-      orderId: body.orderId,
-      projectId: body.projectId,
-      userId: body.userId,
-      plan,
-      provider: 'mock',
-    });
+    // NOTE: Mock billing adapter for local/demo simulation only — no real money movement.
+    if (this.store.recordOrderAndSetUserPlan) {
+      await this.store.recordOrderAndSetUserPlan({
+        orderId: body.orderId,
+        projectId: body.projectId,
+        userId: body.userId,
+        plan,
+        provider: 'mock',
+      });
+    } else {
+      const isNew = await this.store.recordOrderIfNew({
+        orderId: body.orderId,
+        projectId: body.projectId,
+        userId: body.userId,
+        plan,
+        provider: 'mock',
+      });
 
-    if (isNew) {
-      await this.store.setUserPlan(body.projectId, body.userId, plan);
+      if (isNew) {
+        await this.store.setUserPlan(body.projectId, body.userId, plan);
+      }
     }
 
     return {
@@ -268,16 +287,26 @@ export class CreemBillingAdapter implements AppBillingPort {
     }
 
     const plan: 'free' | 'pro' = meta.plan === 'free' ? 'free' : 'pro';
-    const isNew = await this.store.recordOrderIfNew({
-      orderId,
-      projectId: meta.projectId,
-      userId: meta.userId,
-      plan,
-      provider: 'creem',
-    });
+    if (this.store.recordOrderAndSetUserPlan) {
+      await this.store.recordOrderAndSetUserPlan({
+        orderId,
+        projectId: meta.projectId,
+        userId: meta.userId,
+        plan,
+        provider: 'creem',
+      });
+    } else {
+      const isNew = await this.store.recordOrderIfNew({
+        orderId,
+        projectId: meta.projectId,
+        userId: meta.userId,
+        plan,
+        provider: 'creem',
+      });
 
-    if (isNew) {
-      await this.store.setUserPlan(meta.projectId, meta.userId, plan);
+      if (isNew) {
+        await this.store.setUserPlan(meta.projectId, meta.userId, plan);
+      }
     }
 
     return {
