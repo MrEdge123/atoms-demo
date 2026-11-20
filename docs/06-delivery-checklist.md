@@ -64,14 +64,14 @@
 ### 3.2 已完成生产改造与加固要点
 | 实施项 | 落地结果 |
 | --- | --- |
-| **1. 多模型 LLM 接入与流式防卡死** | 默认采用 `deepseek:deepseek-flash`，开放 DeepSeek（`flash` / `v4-pro`）与 Kimi（`k3.1-pro-highspeed` / `k2.6` / `k2.7-code-highspeed`）及 Mock 共 7 个可选模型；修复 `streamObject`/`streamText` `fullStream` 消费与 `AbortController` 回收、增加结构化日志 `[Workflow]`/`[LLM]`、单项目 `activeRuns` 互斥锁及失败态兜底恢复 |
+| **1. 多模型 LLM 接入与流式防卡死** | 在当前 DeepSeek + Kimi 生产配置下首选项为 `deepseek:deepseek-flash`，开放 DeepSeek（`flash` / `v4-pro`）、Kimi（`k3.1-pro-highspeed` / `k2.6` / `k2.7-code-highspeed`）及 Mock 共 7 个可选模型；修复 `streamObject`/`streamText` `fullStream` 消费与 `AbortController` 回收、增加结构化日志 `[Workflow]`/`[LLM]`、单项目 `activeRuns` 互斥锁及失败态兜底恢复 |
 | **2. 云主机、域名与 HTTPS** | 腾讯云轻量应用服务器（中国香港）绑定域名 `xcodea.online`，由 **Caddy 2** 自动签发 Let's Encrypt TLS 证书，对非 SSE 接口开启 `zstd`/`gzip` 压缩，对 `/start`、`/confirm`、`/iterate` SSE 流禁用缓冲（`flush_interval -1`） |
 | **3. 云端持久化 Postgres 16** | `postgres:16-alpine` 绑定命名持久卷 `postgres_data`；加固 `pg` 空闲连接 `pool.on('error')`、`APP_AUTH_SECRET` 生产强校验、PG `23505` slug 冲突重试与轻量 `/api/health` 探测 |
 | **4. 性能优化与竞态修复** | 预览产物开启 esbuild 压缩与生产树摇（bundle 体积由 ~1.35 MB 降至 ~280 KB 级）、项目列表接口裁剪多 MB HTML 载荷并标记 `no-store`、前端 `Workbench` 加固列表版本号守卫/保存锁/SSE 报错保真、Race Mode 单路异常隔离保留可用分支 |
 
 ### 3.3 第二阶段验收实测记录
 - **多模型真实探测（`scripts/verify-live-llm.mjs`）**：`deepseek:deepseek-flash`、`deepseek:deepseek-v4-pro`、`kimi:kimi-k3.1-pro-highspeed`、`kimi:kimi-k2.6`、`kimi:kimi-k2.7-code-highspeed` 共 5 个真实模型结构化生成全部通过；生产环境实测 Kimi `/start` + 线性 `/confirm` 编译成功。
-- **公网 HTTP 17 步闭环冒烟（`node scripts/e2e-http-smoke.mjs https://xcodea.online`）**：17 步全部通过（健康检查 `postgres + vercel-ai`、7 模型列表、SSE 启动、Race Mode `409` 门禁、选枝发布、`/s/[slug]` SEO/OG、跨项目 JWT 隔离、`@atoms/cloud` 读写、HMAC Webhook 升级 Pro、Cloud 面板与 ZIP 导出、多轮增量迭代、源码重编译、重命名与级联删除）。
+- **公网 HTTP 17 步闭环冒烟（`node scripts/e2e-http-smoke.mjs https://xcodea.online`）**：17 步全部通过（脚本以 `mock-default` 断言健康接口 `ok: true`、模型数 `>= 2`、SSE 启动、Race Mode `409` 门禁、选枝发布、`/s/[slug]` SEO/OG、跨项目 JWT 隔离、`@atoms/cloud` 读写、HMAC Webhook 升级 Pro、Cloud 面板与 ZIP 导出、多轮增量迭代、源码重编译、重命名与级联删除；同次实测返回观测到线上运行配置为 `storage: 'postgres'`、`llm: 'vercel-ai'` 及 7 个可选模型，真实大模型生成链路已由上述 5 模型探测与下方浏览器实测独立验证）。
 - **公网真实浏览器端到端验收（`https://xcodea.online`）**：在 `deepseek:deepseek-flash` 下完成自由需求输入、未确认门禁验证、Race Mode 双枝构建（`291 KB` / `279 KB`）与采纳 B 枝、`Coffee Tester`（`coffee.tester@example.com`）注册与 `reservations` 写入（`PERSIST-2026-CHECK`）、源码在线编辑重编译（`Roast Lab Tasting Bar · 精品烘焙`）、增量迭代（`限时冬季豆单`徽章，`287 KB`）、项目重命名/删除、公网 `/s/app-otqlo` 与 QR/OG 校验，以及 Mock 收银台 → HMAC Webhook → `Pro 已激活` 解锁，**全程 0 控制台报错、0 5xx 响应**。
 - **容器重启持久化复核**：执行 `docker compose restart app` 后，服务自动恢复 `Healthy`；API 与浏览器硬刷新均验证用户登录态、`Pro 已激活` 权益、`限时冬季豆单` 及预约记录 `PERSIST-2026-CHECK` 完整留存（0 控制台报错、0 5xx）。
 - **Codex CLI 代码与 Diff 审查**：多轮差异审查及全仓排查中识别的 `P0`/`P1` 风险已全部修复合入，最终增量 `799d295` 零 `P0`/`P1` 问题。

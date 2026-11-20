@@ -32,7 +32,7 @@
 ### 环境变量配置（`.env.local`）
 参考 [.env.example](./.env.example)：
 - 离线默认模式无需配置任何外部密钥即可完整跑通（`LLM_ADAPTER=mock`、`STORAGE_ADAPTER=pglite`、`BILLING_ADAPTER=mock`）。
-- 接入真实大模型时填入 `DEEPSEEK_API_KEY`（及可选 `KIMI_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`）并设 `LLM_ADAPTER=vercel-ai`（默认模型为 `deepseek:deepseek-flash`，支持切换 `deepseek-v4-pro` 与 Kimi 系列共 7 个模型选项）。
+- 接入真实大模型时设 `LLM_ADAPTER=vercel-ai` 并填入对应厂商密钥（支持 `DEEPSEEK_API_KEY`、`KIMI_API_KEY`、`OPENAI_API_KEY`、`ANTHROPIC_API_KEY`）。在已验收的 DeepSeek + Kimi 生产配置下（仅配置 `DEEPSEEK_API_KEY` 与 `KIMI_API_KEY`），工作台提供 7 个可选模型（`deepseek:deepseek-flash` 为默认首选项，另含 `deepseek:deepseek-v4-pro`、3 个 Kimi 模型及 2 个 Mock 模型）；如仅配 `DEEPSEEK_API_KEY` 则为 4 个选项，若同时配置 OpenAI / Anthropic 密钥，首选项会按 `/api/models` 返回顺序排在前面。
 - 部署云端 Postgres 时设 `STORAGE_ADAPTER=postgres`、`DATABASE_URL` 与强随机 `APP_AUTH_SECRET`。
 
 ### 线上部署架构（第二阶段已完成）
@@ -43,9 +43,10 @@
   - `caddy:2-alpine`：自动签发/续期 Let's Encrypt HTTPS 证书，启用非 SSE 路由 `zstd`/`gzip` 压缩，SSE 流透传 `flush_interval -1`。
   - `app`：Next.js 15 `output: 'standalone'` 容器，运行 `STORAGE_ADAPTER=postgres`、`LLM_ADAPTER=vercel-ai`、`BILLING_ADAPTER=mock`。
   - `postgres:16-alpine`：挂载命名持久卷 `postgres_data`，容器重建/重启后项目与 `@atoms/cloud` 数据完整保留。
+- **公网 HTTPS 前置条件**：将 apex 域名与 `www` 子域的 DNS `A` 记录解析至服务器公网 IP，并在云主机防火墙放行入站 `TCP 80 / 443`（可选放行 `UDP 443` 以支持 HTTP/3），完整步骤参见 [07 - 国内环境外部依赖调研与组件选型指南](./docs/07-china-external-dependencies-research.md)。
 
 ```bash
-# 生产环境变量模板（Compose 读取同目录 .env 文件，请填入 POSTGRES_PASSWORD / APP_AUTH_SECRET / SITE_DOMAIN / APP_BASE_URL 与真实模型密钥）
+# 生产环境变量模板（Compose 读取同目录 .env；POSTGRES_PASSWORD 会直接拼接进 DATABASE_URL，请使用十六进制或纯字母数字等 URI 安全随机密码，避免 # / ? 等特殊字符；同时填入 APP_AUTH_SECRET / SITE_DOMAIN / APP_BASE_URL 与模型密钥）
 cp .env.production.example .env
 
 # 启动 Docker Compose 全栈（Postgres 16 + Next.js Standalone + Caddy HTTPS）
