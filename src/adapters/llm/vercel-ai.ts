@@ -1,6 +1,6 @@
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
-import { generateObject, generateText, streamText, type LanguageModelV1 } from 'ai';
+import { streamObject, streamText, type LanguageModelV1 } from 'ai';
 import type { ZodType } from 'zod';
 import type { LLMProvider, ModelInfo, SchemaLike } from '../../ports';
 
@@ -146,8 +146,8 @@ export class VercelAISDKProvider implements LLMProvider {
 
     if (env.kimiApiKey) {
       const modelIds = parseModelList(env.kimiModel, [
-        'kimi-k2.6',
         'kimi-k3.1-pro-highspeed',
+        'kimi-k2.6',
         'kimi-k2.7-code-highspeed',
       ]);
       const kimiBaseUrl = env.kimiBaseUrl || 'https://api.moonshot.cn/v1';
@@ -236,15 +236,16 @@ export class VercelAISDKProvider implements LLMProvider {
     try {
       const res =
         provider === 'anthropic'
-          ? await generateObject({
+          ? streamObject({
               model,
               system: input.system,
               prompt: input.prompt,
               schema: zodSchema,
               maxTokens,
+              maxRetries: 0,
               abortSignal: AbortSignal.timeout(150_000),
             })
-          : await generateObject({
+          : streamObject({
               model,
               system: input.system,
               prompt: input.prompt,
@@ -252,27 +253,33 @@ export class VercelAISDKProvider implements LLMProvider {
               mode: 'json',
               temperature,
               maxTokens,
+              maxRetries: 0,
               abortSignal: AbortSignal.timeout(150_000),
             });
-      return res.object;
+      return await res.object;
     } catch (primaryErr) {
       const primaryMsg =
         primaryErr instanceof Error ? primaryErr.message : String(primaryErr);
       console.warn(
-        `[VercelAISDKProvider] generateObject primary failed for "${provider}" (${input.model || this.defaultModelId}): ${primaryMsg}; trying generateText JSON fallback`
+        `[VercelAISDKProvider] streamObject primary failed for "${provider}" (${input.model || this.defaultModelId}): ${primaryMsg}; trying streamText JSON fallback`
       );
-      // Resilient single-shot fallback for domestic OpenAI-compatible gateways
-      // that occasionally emit markdown fences around JSON payloads.
-      const fallback = await generateText({
+      // Resilient streaming fallback for domestic gateways that emit markdown fences
+      // or occasionally fail strict schema validation mid-stream.
+      const fallback = streamText({
         model,
         system: `${input.system}\n\nIMPORTANT: Return ONLY a valid raw JSON object that conforms strictly to the requested structure. Do not include markdown fences or any prose outside JSON.`,
         prompt: input.prompt,
         temperature,
         maxTokens,
+        maxRetries: 0,
         abortSignal: AbortSignal.timeout(120_000),
       });
 
-      const jsonText = extractJsonObjectText(fallback.text);
+      const [fallbackText, finishReason] = await Promise.all([
+        fallback.text,
+        fallback.finishReason,
+      ]);
+      const jsonText = extractJsonObjectText(fallbackText);
       try {
         const parsed = JSON.parse(jsonText);
         return zodSchema.parse(parsed);
@@ -280,7 +287,7 @@ export class VercelAISDKProvider implements LLMProvider {
         const fallbackMsg =
           fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
         console.warn(
-          `[VercelAISDKProvider] generateText fallback failed for "${provider}": ${fallbackMsg} (finishReason=${fallback.finishReason}, textLen=${fallback.text.length})`
+          `[VercelAISDKProvider] streamText fallback failed for "${provider}": ${fallbackMsg} (finishReason=${finishReason}, textLen=${fallbackText.length})`
         );
         throw new Error(
           `Structured JSON generation failed for provider "${provider}": ${primaryMsg}`

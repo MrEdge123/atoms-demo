@@ -92,7 +92,7 @@ function main() {
   lines = upsertEnvVar(
     lines,
     'KIMI_MODEL',
-    'kimi-k2.6,kimi-k3.1-pro-highspeed,kimi-k2.7-code-highspeed'
+    'kimi-k3.1-pro-highspeed,kimi-k2.6,kimi-k2.7-code-highspeed'
   );
 
   fs.writeFileSync(ENV_LOCAL_PATH, `${lines.join('\n')}\n`, 'utf8');
