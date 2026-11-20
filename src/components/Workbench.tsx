@@ -1,0 +1,1926 @@
+'use client';
+
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  AlertTriangle,
+  ArrowUp,
+  Check,
+  CheckCircle2,
+  ChevronDown,
+  Code2,
+  Copy,
+  Database,
+  Download,
+  ExternalLink,
+  Eye,
+  FileCode,
+  FolderPlus,
+  Home,
+  LayoutGrid,
+  Monitor,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Pencil,
+  RefreshCw,
+  Rocket,
+  Save,
+  Search,
+  Share2,
+  Smartphone,
+  Sparkles,
+  Trash2,
+  Wrench,
+  X,
+  Zap,
+} from 'lucide-react';
+import type {
+  AgentEvent,
+  CloudCapability,
+  CompileError,
+  ProductPlan,
+  Project,
+} from '@/domain';
+import type { ModelInfo } from '@/ports';
+import {
+  getMutationBlockReason,
+  hasPendingRaceSelection as checkPendingRaceSelection,
+  isBuildingInProgress,
+  isPendingPlanConfirmation,
+  isPlanningInProgress,
+} from '@/core/guards';
+import { CloudDataPanel } from './CloudDataPanel';
+import {
+  AgentBadge,
+  AtomsLogoMark,
+  ModelDropdown,
+  StatusPill,
+} from './atoms/AtomsMark';
+import { GoodPathCard } from './atoms/GoodPathCard';
+import { LauncherView, type DemoIdeaPreset } from './atoms/LauncherView';
+import { SharePublishPopover } from './atoms/SharePublishPopover';
+import { TimelineStream } from './atoms/TimelineStream';
+
+interface ProjectSnapshotResponse {
+  project: Project;
+  events: AgentEvent[];
+  previewHtml: string | null;
+  compileErrors: CompileError[];
+  qrDataUrl: string | null;
+  publicUrl: string | null;
+}
+
+const DEMO_IDEAS: DemoIdeaPreset[] = [
+  {
+    label: '活动报名与签到站',
+    tag: '报名 · 签到 · CSV',
+    desc: '含参会者注册登录、活动日程、在线报名与现场签到状态切换，支持 Pro 会员导出 CSV。',
+    idea: '做一个科技沙龙活动报名与现场签到管理系统，支持参会者注册登录、报名表单提交、签到状态切换与 Pro 会员 CSV 导出。',
+  },
+  {
+    label: 'PulseCRM 轻量客户台',
+    tag: '线索 · 筛选 · 导出',
+    desc: '面向独立顾问的客户线索录入、跟进阶段管理、关键词搜索筛选与 Pro 导出。',
+    idea: '做一个独立顾问用的轻量 CRM 客户跟进台，支持线索录入、跟进状态管理、搜索筛选和 Pro 会员导出。',
+  },
+  {
+    label: 'InkVault 云端笔记站',
+    tag: '认证 · 笔记 · 导出',
+    desc: '支持终端账号隔离、标签分类搜索、笔记持久化存储与 Pro 高级导出。',
+    idea: '做一个支持账号隔离、标签搜索与 Pro 会员高级导出的云端个人笔记站。',
+  },
+];
+
+const ALL_CAPABILITIES: Array<{ id: CloudCapability; label: string }> = [
+  { id: 'db', label: 'DB 持久化' },
+  { id: 'auth', label: 'Auth 账号' },
+  { id: 'billing', label: 'Billing 订阅' },
+  { id: 'ai', label: 'AI 代理' },
+];
+
+async function readSseStream(
+  res: Response,
+  onEvent: (ev: AgentEvent) => void
+): Promise<void> {
+  if (!res.ok) {
+    const text = await res.text();
+    let message = text;
+    try {
+      const parsed = JSON.parse(text) as { error?: string };
+      if (parsed?.error) {
+        message = parsed.error;
+      }
+    } catch {
+      // Keep raw text error when not JSON
+    }
+    throw new Error(message || `HTTP ${res.status}`);
+  }
+  if (!res.body) return;
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const parts = buffer.split('\n\n');
+    buffer = parts.pop() ?? '';
+    for (const part of parts) {
+      const line = part.split('\n').find((l) => l.startsWith('data: '));
+      if (!line) continue;
+      try {
+        const parsed = JSON.parse(line.slice(6)) as AgentEvent;
+        onEvent(parsed);
+      } catch {
+        // Ignore malformed SSE chunks
+      }
+    }
+  }
+}
+
+export function Workbench() {
+  const [viewMode, setViewMode] = useState<'launcher' | 'workspace'>('launcher');
+  const [workspaceSidebarOpen, setWorkspaceSidebarOpen] = useState(false);
+
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [snapshot, setSnapshot] = useState<ProjectSnapshotResponse | null>(null);
+  const [events, setEvents] = useState<AgentEvent[]>([]);
+
+  const [models, setModels] = useState<ModelInfo[]>([]);
+  const [selectedModel, setSelectedModel] = useState<string>('');
+
+  const [launcherIdea, setLauncherIdea] = useState(DEMO_IDEAS[0].idea);
+  const [composerMode, setComposerMode] = useState<'iterate' | 'restart'>(
+    'restart'
+  );
+  const [composerText, setComposerText] = useState('');
+  const [buildMode, setBuildMode] = useState<'linear' | 'race'>('linear');
+  const [editablePlan, setEditablePlan] = useState<ProductPlan | null>(null);
+
+  const [busyAction, setBusyAction] = useState<string>('');
+  const [errorMsg, setErrorMsg] = useState<string>('');
+  const [runtimeError, setRuntimeError] = useState<string>('');
+
+  const [rightTab, setRightTab] = useState<
+    'preview' | 'code' | 'cloud' | 'overview'
+  >('preview');
+  const [viewport, setViewport] = useState<'desktop' | 'mobile'>('desktop');
+  const [selectedFile, setSelectedFile] = useState<string>('');
+  const [fileFilter, setFileFilter] = useState('');
+  const [copiedCode, setCopiedCode] = useState(false);
+
+  const [projectMenuOpen, setProjectMenuOpen] = useState(false);
+  const [renamingProject, setRenamingProject] = useState(false);
+  const [renameTitleInput, setRenameTitleInput] = useState('');
+  const [confirmDeleteProjectId, setConfirmDeleteProjectId] = useState<
+    string | null
+  >(null);
+  const [shareOpen, setShareOpen] = useState(false);
+
+  const [isEditingCode, setIsEditingCode] = useState(false);
+  const [codeDraft, setCodeDraft] = useState('');
+  const [savingCode, setSavingCode] = useState(false);
+  const [codeSaveBanner, setCodeSaveBanner] = useState<{
+    ok: boolean;
+    message: string;
+  } | null>(null);
+  const [codeCompileErrors, setCodeCompileErrors] = useState<CompileError[]>(
+    []
+  );
+
+  const projectMenuRef = useRef<HTMLDivElement>(null);
+  const chatScrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleOutside(e: MouseEvent) {
+      if (
+        projectMenuRef.current &&
+        !projectMenuRef.current.contains(e.target as Node)
+      ) {
+        setProjectMenuOpen(false);
+        setRenamingProject(false);
+        setConfirmDeleteProjectId(null);
+      }
+    }
+    document.addEventListener('mousedown', handleOutside);
+    return () => document.removeEventListener('mousedown', handleOutside);
+  }, []);
+
+  const loadSnapshot = useCallback(async (projectId: string) => {
+    const res = await fetch(`/api/projects/${projectId}`);
+    if (!res.ok) return null;
+    const data = (await res.json()) as ProjectSnapshotResponse;
+    setSnapshot(data);
+    setEvents(data.events);
+    setEditablePlan(data.project.plan);
+
+    const fileKeys = Object.keys(data.project.draftFiles);
+    if (fileKeys.length > 0) {
+      setSelectedFile((prev) =>
+        prev && fileKeys.includes(prev) ? prev : fileKeys[0]
+      );
+    } else {
+      setSelectedFile('');
+    }
+    return data;
+  }, []);
+
+  const refreshProjectsList = useCallback(async (preferredId?: string | null) => {
+    const [projRes, modelRes] = await Promise.all([
+      fetch('/api/projects'),
+      fetch('/api/models'),
+    ]);
+    if (modelRes.ok) {
+      const mData = (await modelRes.json()) as { models: ModelInfo[] };
+      setModels(mData.models);
+      setSelectedModel((prev) => prev || mData.models[0]?.id || 'mock-default');
+    }
+    if (projRes.ok) {
+      const pData = (await projRes.json()) as { projects: Project[] };
+      setProjects(pData.projects);
+      const targetId =
+        preferredId && pData.projects.some((p) => p.id === preferredId)
+          ? preferredId
+          : pData.projects[0]?.id ?? null;
+      return { projects: pData.projects, targetId };
+    }
+    return { projects: [] as Project[], targetId: null as string | null };
+  }, []);
+
+  useEffect(() => {
+    void refreshProjectsList();
+  }, [refreshProjectsList]);
+
+  useEffect(() => {
+    function handleFrameMessage(event: MessageEvent) {
+      const payload = event.data as { type?: string; message?: string } | null;
+      if (payload?.type === 'ATOMS_RUNTIME_ERROR' && payload.message) {
+        setRuntimeError(payload.message);
+      }
+    }
+    window.addEventListener('message', handleFrameMessage);
+    return () => window.removeEventListener('message', handleFrameMessage);
+  }, []);
+
+  useEffect(() => {
+    if (chatScrollRef.current && viewMode === 'workspace') {
+      chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
+    }
+  }, [events.length, editablePlan, viewMode]);
+
+  const project = snapshot?.project ?? null;
+  const draftFiles = useMemo(() => project?.draftFiles ?? {}, [project]);
+  const fileNames = useMemo(() => Object.keys(draftFiles), [draftFiles]);
+  const filteredFileNames = useMemo(() => {
+    const q = fileFilter.trim().toLowerCase();
+    if (!q) return fileNames;
+    return fileNames.filter((f) => f.toLowerCase().includes(q));
+  }, [fileNames, fileFilter]);
+
+  const hasDraft = fileNames.length > 0;
+  const raceBranches = project?.raceBranches ?? [];
+  const hasPendingPlanConfirmation = project
+    ? isPendingPlanConfirmation(project)
+    : false;
+  const isPlanning = project ? isPlanningInProgress(project) : false;
+  const isBuilding = project ? isBuildingInProgress(project) : false;
+  const hasPendingRaceSelection = project
+    ? checkPendingRaceSelection(project)
+    : false;
+  const iterateBlockReason = project
+    ? getMutationBlockReason(project, 'iterate')
+    : null;
+  const publishBlockReason = project
+    ? getMutationBlockReason(project, 'publish')
+    : null;
+  const isMutationLocked = Boolean(iterateBlockReason);
+
+  async function openProjectInWorkspace(projectId: string) {
+    setErrorMsg('');
+    setRuntimeError('');
+    setShareOpen(false);
+    setProjectMenuOpen(false);
+    setRenamingProject(false);
+    setConfirmDeleteProjectId(null);
+    setIsEditingCode(false);
+    setCodeSaveBanner(null);
+    setCodeCompileErrors([]);
+    setComposerText('');
+    setActiveId(projectId);
+    setViewMode('workspace');
+    setWorkspaceSidebarOpen(false);
+    setRightTab('preview');
+    const data = await loadSnapshot(projectId);
+    if (data) {
+      const draftCount = Object.keys(data.project.draftFiles).length;
+      setComposerMode(draftCount > 0 ? 'iterate' : 'restart');
+    }
+  }
+
+  async function createNewProject(title?: string): Promise<Project> {
+    const res = await fetch('/api/projects', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: title || `新项目 ${projects.length + 1}`,
+      }),
+    });
+    const data = (await res.json()) as { project: Project };
+    setProjects((prev) => [data.project, ...prev]);
+    setActiveId(data.project.id);
+    return data.project;
+  }
+
+  async function handleNewBlankProject() {
+    setErrorMsg('');
+    setRuntimeError('');
+    setShareOpen(false);
+    setProjectMenuOpen(false);
+    setRenamingProject(false);
+    setConfirmDeleteProjectId(null);
+    setIsEditingCode(false);
+    setCodeSaveBanner(null);
+    setCodeCompileErrors([]);
+    setComposerText('');
+    const created = await createNewProject();
+    setViewMode('workspace');
+    setWorkspaceSidebarOpen(false);
+    setRightTab('preview');
+    setComposerMode('restart');
+    await loadSnapshot(created.id);
+  }
+
+  async function startSopForProject(projectId: string, ideaText: string) {
+    const trimmed = ideaText.trim();
+    if (!trimmed) return;
+    setErrorMsg('');
+    setRuntimeError('');
+    setShareOpen(false);
+    setBusyAction('Iris / Emma 正在分析需求...');
+    try {
+      const res = await fetch(`/api/projects/${projectId}/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          idea: trimmed,
+          model: selectedModel || undefined,
+        }),
+      });
+      await readSseStream(res, (ev) => {
+        setEvents((prev) => [...prev, ev]);
+      });
+      await refreshProjectsList(projectId);
+      const latest = await loadSnapshot(projectId);
+      if (latest && Object.keys(latest.project.draftFiles).length > 0) {
+        setComposerMode('iterate');
+      }
+      setComposerText('');
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusyAction('');
+    }
+  }
+
+  async function handleLauncherSubmit() {
+    const trimmed = launcherIdea.trim();
+    if (!trimmed || busyAction) return;
+    setErrorMsg('');
+    setRuntimeError('');
+    setShareOpen(false);
+    const created = await createNewProject('AI 构建新项目');
+    setSnapshot({
+      project: created,
+      events: [],
+      previewHtml: null,
+      compileErrors: [],
+      qrDataUrl: null,
+      publicUrl: null,
+    });
+    setEvents([]);
+    setEditablePlan(null);
+    setSelectedFile('');
+    setComposerMode('restart');
+    setViewMode('workspace');
+    setWorkspaceSidebarOpen(false);
+    setRightTab('preview');
+    await startSopForProject(created.id, trimmed);
+  }
+
+  async function handleConfirmAndBuild() {
+    if (!activeId || !editablePlan || busyAction || isPlanning || isBuilding) {
+      return;
+    }
+    setErrorMsg('');
+    setRuntimeError('');
+    setShareOpen(false);
+    setBusyAction(
+      buildMode === 'race'
+        ? 'Race Mode 并行生成双方案中...'
+        : 'Alex 正在编写并编译应用...'
+    );
+    try {
+      const res = await fetch(`/api/projects/${activeId}/confirm`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          planPatch: editablePlan,
+          model: selectedModel || undefined,
+          mode: buildMode,
+        }),
+      });
+      await readSseStream(res, (ev) => {
+        setEvents((prev) => [...prev, ev]);
+      });
+      await refreshProjectsList(activeId);
+      const latest = await loadSnapshot(activeId);
+      if (latest && Object.keys(latest.project.draftFiles).length > 0) {
+        setComposerMode('iterate');
+      }
+      setRightTab('preview');
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusyAction('');
+    }
+  }
+
+  async function handleSelectBranch(branchId: string) {
+    if (!activeId || busyAction || hasPendingPlanConfirmation || isBuilding) {
+      return;
+    }
+    setErrorMsg('');
+    setShareOpen(false);
+    setBusyAction('正在切换所选方案...');
+    try {
+      const res = await fetch(`/api/projects/${activeId}/select-branch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ branchId }),
+      });
+      if (!res.ok) {
+        const j = (await res.json()) as { error?: string };
+        throw new Error(j.error || '切换失败');
+      }
+      await refreshProjectsList(activeId);
+      await loadSnapshot(activeId);
+      setComposerMode('iterate');
+      setRightTab('preview');
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusyAction('');
+    }
+  }
+
+  async function handleIterate(customInstruction?: string) {
+    const instruction = (customInstruction ?? composerText).trim();
+    if (!activeId || !instruction || iterateBlockReason || busyAction) return;
+    setErrorMsg('');
+    setRuntimeError('');
+    setShareOpen(false);
+    setBusyAction('Alex 正在按指令迭代修改...');
+    try {
+      const res = await fetch(`/api/projects/${activeId}/iterate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          instruction,
+          model: selectedModel || undefined,
+        }),
+      });
+      await readSseStream(res, (ev) => {
+        setEvents((prev) => [...prev, ev]);
+      });
+      if (!customInstruction) setComposerText('');
+      await refreshProjectsList(activeId);
+      await loadSnapshot(activeId);
+      setRightTab('preview');
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusyAction('');
+    }
+  }
+
+  async function handlePublish() {
+    if (!activeId || !hasDraft || publishBlockReason || busyAction) return;
+    setErrorMsg('');
+    setBusyAction('正在构建并发布独立生产站点...');
+    try {
+      const res = await fetch(`/api/projects/${activeId}/publish`, {
+        method: 'POST',
+      });
+      const data = (await res.json()) as {
+        url?: string;
+        version?: number;
+        qrDataUrl?: string;
+        error?: string;
+      };
+      if (!res.ok || !data.url || !data.qrDataUrl) {
+        throw new Error(data.error || '发布失败');
+      }
+      await refreshProjectsList(activeId);
+      await loadSnapshot(activeId);
+      setShareOpen(true);
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusyAction('');
+    }
+  }
+
+  async function handleWorkspaceComposerSubmit() {
+    const text = composerText.trim();
+    if (!text || busyAction) return;
+
+    if (composerMode === 'iterate') {
+      if (isMutationLocked) return;
+      await handleIterate(text);
+      return;
+    }
+
+    const pid = activeId ?? (await createNewProject('新应用项目')).id;
+    await startSopForProject(pid, text);
+  }
+
+  function toggleCapability(cap: CloudCapability) {
+    if (!editablePlan) return;
+    const has = editablePlan.capabilities.includes(cap);
+    const next = has
+      ? editablePlan.capabilities.filter((c) => c !== cap)
+      : [...editablePlan.capabilities, cap];
+    setEditablePlan({
+      ...editablePlan,
+      capabilities: next.length > 0 ? next : ['db'],
+    });
+  }
+
+  async function handleRenameProject(projectId: string, nextTitle: string) {
+    const trimmed = nextTitle.trim();
+    if (!trimmed) return;
+    setErrorMsg('');
+    try {
+      const res = await fetch(`/api/projects/${projectId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: trimmed }),
+      });
+      const data = (await res.json()) as { project?: Project; error?: string };
+      if (!res.ok || !data.project) {
+        throw new Error(data.error || '重命名失败');
+      }
+      setProjects((prev) =>
+        prev.map((p) => (p.id === projectId ? data.project! : p))
+      );
+      setSnapshot((prev) =>
+        prev && prev.project.id === projectId
+          ? { ...prev, project: data.project! }
+          : prev
+      );
+      setRenamingProject(false);
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function handleDeleteProject(projectId: string) {
+    setErrorMsg('');
+    try {
+      const res = await fetch(`/api/projects/${projectId}`, {
+        method: 'DELETE',
+      });
+      const data = (await res.json()) as { ok?: boolean; error?: string };
+      if (!res.ok) {
+        throw new Error(data.error || '删除项目失败');
+      }
+      setProjects((prev) => prev.filter((p) => p.id !== projectId));
+      setConfirmDeleteProjectId(null);
+      setProjectMenuOpen(false);
+      if (activeId === projectId) {
+        setActiveId(null);
+        setSnapshot(null);
+        setEvents([]);
+        setEditablePlan(null);
+        setSelectedFile('');
+        setIsEditingCode(false);
+        setCodeSaveBanner(null);
+        setCodeCompileErrors([]);
+        setShareOpen(false);
+        setViewMode('launcher');
+      }
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function handleSaveSourceCode() {
+    if (
+      !activeId ||
+      !selectedFile ||
+      isMutationLocked ||
+      Boolean(busyAction) ||
+      savingCode
+    ) {
+      return;
+    }
+    setSavingCode(true);
+    setCodeSaveBanner(null);
+    setCodeCompileErrors([]);
+    try {
+      const nextFiles = { ...draftFiles, [selectedFile]: codeDraft };
+      const res = await fetch(`/api/projects/${activeId}/files`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ files: nextFiles }),
+      });
+      const data = (await res.json()) as {
+        project?: Project;
+        ok?: boolean;
+        previewHtml?: string | null;
+        compileErrors?: CompileError[];
+        error?: string;
+      };
+      if (!res.ok || !data.project) {
+        throw new Error(data.error || '保存源码失败');
+      }
+
+      setSnapshot((prev) =>
+        prev
+          ? {
+              ...prev,
+              project: data.project!,
+              previewHtml: data.previewHtml ?? prev.previewHtml,
+              compileErrors: data.compileErrors ?? [],
+            }
+          : prev
+      );
+      setProjects((prev) =>
+        prev.map((p) => (p.id === activeId ? data.project! : p))
+      );
+      await loadSnapshot(activeId);
+
+      if (data.ok) {
+        setIsEditingCode(false);
+        setCodeCompileErrors([]);
+        setCodeSaveBanner({
+          ok: true,
+          message: '已保存源码并重新编译通过（仅更新草稿预览，不影响已发布线上版本）',
+        });
+      } else {
+        setCodeCompileErrors(data.compileErrors ?? []);
+        setCodeSaveBanner({
+          ok: false,
+          message: '源码已保存为草稿，但存在编译错误，请按下方提示修正后重编',
+        });
+      }
+    } catch (err) {
+      setCodeSaveBanner({
+        ok: false,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setSavingCode(false);
+    }
+  }
+
+  function returnToLauncher() {
+    setShareOpen(false);
+    setProjectMenuOpen(false);
+    setRenamingProject(false);
+    setConfirmDeleteProjectId(null);
+    setIsEditingCode(false);
+    setCodeSaveBanner(null);
+    setCodeCompileErrors([]);
+    setWorkspaceSidebarOpen(false);
+    setErrorMsg('');
+    setRuntimeError('');
+    setViewMode('launcher');
+  }
+
+  if (viewMode === 'launcher') {
+    return (
+      <LauncherView
+        projects={projects}
+        models={models}
+        selectedModel={selectedModel}
+        onSelectModel={setSelectedModel}
+        idea={launcherIdea}
+        onIdeaChange={setLauncherIdea}
+        presets={DEMO_IDEAS}
+        busyAction={busyAction}
+        errorMsg={errorMsg}
+        onSubmitIdea={() => void handleLauncherSubmit()}
+        onOpenProject={(pid) => void openProjectInWorkspace(pid)}
+        onCreateBlankProject={() => void handleNewBlankProject()}
+        onDeleteProject={(pid) => void handleDeleteProject(pid)}
+      />
+    );
+  }
+
+  const effectiveComposerMode = hasDraft ? composerMode : 'restart';
+  const composerLocked =
+    Boolean(busyAction) ||
+    (effectiveComposerMode === 'iterate' && isMutationLocked);
+  const canSubmitComposer = Boolean(composerText.trim()) && !composerLocked;
+  const codeLines =
+    selectedFile && draftFiles[selectedFile]
+      ? draftFiles[selectedFile].split('\n')
+      : [];
+
+  return (
+    <div className="h-screen flex flex-col bg-[#f3f3f0] text-[#0c0c0c]/95 overflow-hidden">
+      {/* Unified 44px Atoms Top Header */}
+      <header className="h-11 shrink-0 px-3 flex items-center justify-between gap-3 border-b border-black/[0.06] bg-[#f3f3f0]">
+        {/* Left Navigation & Project Identity */}
+        <div className="flex items-center gap-2 min-w-0">
+          <button
+            type="button"
+            onClick={() => setWorkspaceSidebarOpen((v) => !v)}
+            aria-label={workspaceSidebarOpen ? '收起项目侧栏' : '展开项目侧栏'}
+            className="w-7 h-7 rounded-lg flex items-center justify-center text-[#0c0c0c]/60 hover:bg-black/[0.05] hover:text-[#0c0c0c] transition shrink-0 cursor-pointer"
+          >
+            {workspaceSidebarOpen ? (
+              <PanelLeftClose className="w-4 h-4" />
+            ) : (
+              <PanelLeftOpen className="w-4 h-4" />
+            )}
+          </button>
+
+          <button
+            type="button"
+            onClick={returnToLauncher}
+            title="返回启动大厅"
+            aria-label="返回 Mini Atoms 启动大厅"
+            className="w-7 h-7 rounded-lg flex items-center justify-center hover:bg-black/[0.05] transition shrink-0 cursor-pointer"
+          >
+            <AtomsLogoMark size={20} />
+          </button>
+
+          {/* Custom Project Dropdown */}
+          <div ref={projectMenuRef} className="relative min-w-0">
+            <button
+              type="button"
+              aria-label="切换或管理项目"
+              aria-expanded={projectMenuOpen}
+              onClick={() => setProjectMenuOpen((v) => !v)}
+              className="h-7 max-w-[180px] xl:max-w-[240px] inline-flex items-center gap-1.5 rounded-lg px-2 text-xs font-semibold text-[#0c0c0c]/90 hover:bg-black/[0.05] transition cursor-pointer"
+            >
+              <span className="truncate">
+                {project?.title ?? '未命名应用'}
+              </span>
+              <ChevronDown className="w-3.5 h-3.5 text-[#0c0c0c]/45 shrink-0" />
+            </button>
+
+            {projectMenuOpen && (
+              <div className="absolute left-0 top-full mt-1.5 z-50 w-72 rounded-2xl border border-black/[0.1] bg-white p-1.5 shadow-[0_12px_32px_rgba(12,12,12,0.12)] space-y-1">
+                <button
+                  type="button"
+                  onClick={returnToLauncher}
+                  className="w-full flex items-center gap-2 rounded-xl px-2.5 py-2 text-xs font-medium text-[#0c0c0c]/85 hover:bg-black/[0.04] cursor-pointer"
+                >
+                  <Home className="w-3.5 h-3.5 text-[#0c0c0c]/55" />
+                  返回启动大厅
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleNewBlankProject()}
+                  className="w-full flex items-center gap-2 rounded-xl px-2.5 py-2 text-xs font-medium text-[#4267ff] hover:bg-[#4267ff]/[0.06] cursor-pointer"
+                >
+                  <FolderPlus className="w-3.5 h-3.5" />
+                  新建空白项目
+                </button>
+
+                {project && (
+                  <div className="px-1.5 py-1 space-y-1">
+                    {renamingProject ? (
+                      <form
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          void handleRenameProject(project.id, renameTitleInput);
+                        }}
+                        className="flex items-center gap-1"
+                      >
+                        <input
+                          type="text"
+                          aria-label="重命名项目名称"
+                          maxLength={80}
+                          autoFocus
+                          value={renameTitleInput}
+                          onChange={(e) => setRenameTitleInput(e.target.value)}
+                          className="flex-1 min-w-0 rounded-lg border border-black/[0.15] bg-[#fcfcfb] px-2 py-1 text-xs text-[#0c0c0c]/95 focus:border-[#4267ff] focus:outline-none"
+                        />
+                        <button
+                          type="submit"
+                          disabled={!renameTitleInput.trim()}
+                          className="rounded-lg bg-[#4267ff] px-2 py-1 text-[11px] font-medium text-white hover:bg-[#425ce1] disabled:opacity-40 cursor-pointer"
+                        >
+                          保存
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setRenamingProject(false)}
+                          className="rounded-lg px-1.5 py-1 text-[11px] text-[#0c0c0c]/55 hover:text-[#0c0c0c] cursor-pointer"
+                        >
+                          取消
+                        </button>
+                      </form>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setConfirmDeleteProjectId(null);
+                          setRenameTitleInput(project.title);
+                          setRenamingProject(true);
+                        }}
+                        className="w-full flex items-center gap-2 rounded-xl px-2 py-1.5 text-xs font-medium text-[#0c0c0c]/80 hover:bg-black/[0.04] cursor-pointer"
+                      >
+                        <Pencil className="w-3.5 h-3.5 text-[#0c0c0c]/55" />
+                        重命名当前项目
+                      </button>
+                    )}
+
+                    {confirmDeleteProjectId === project.id ? (
+                      <div className="flex items-center justify-between gap-2 rounded-xl border border-[#c9444a]/25 bg-[#c9444a]/[0.06] px-2.5 py-1.5 text-[11px]">
+                        <span className="text-[#b72027] font-medium">
+                          确认删除此项目？
+                        </span>
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => void handleDeleteProject(project.id)}
+                            className="rounded-full bg-[#c9444a] px-2 py-0.5 text-[10px] font-medium text-white hover:bg-[#b72027] cursor-pointer"
+                          >
+                            确认删除
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setConfirmDeleteProjectId(null)}
+                            className="rounded-full bg-white border border-black/10 px-2 py-0.5 text-[10px] text-[#0c0c0c]/70 cursor-pointer"
+                          >
+                            取消
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled={isPlanning || isBuilding || Boolean(busyAction)}
+                        onClick={() => {
+                          setRenamingProject(false);
+                          setConfirmDeleteProjectId(project.id);
+                        }}
+                        className="w-full flex items-center gap-2 rounded-xl px-2 py-1.5 text-xs font-medium text-[#b72027] hover:bg-[#c9444a]/[0.08] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        删除当前项目
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                <div className="my-1 border-t border-black/[0.06]" />
+                <div className="px-2.5 py-1 text-[10px] font-medium uppercase tracking-wider text-[#0c0c0c]/45">
+                  切换项目 ({projects.length})
+                </div>
+                <div className="max-h-56 overflow-y-auto space-y-0.5">
+                  {projects.map((p) => {
+                    const active = p.id === activeId;
+                    return (
+                      <button
+                        key={p.id}
+                        type="button"
+                        onClick={() => void openProjectInWorkspace(p.id)}
+                        className={`w-full flex items-center justify-between gap-2 rounded-xl px-2.5 py-2 text-left text-xs transition cursor-pointer ${
+                          active
+                            ? 'bg-[#4267ff]/10 text-[#4267ff] font-semibold'
+                            : 'text-[#0c0c0c]/80 hover:bg-black/[0.04]'
+                        }`}
+                      >
+                        <span className="truncate">{p.title}</span>
+                        <StatusPill
+                          status={p.status}
+                          publishedVersion={p.publishedVersion}
+                        />
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {project && (
+            <div className="hidden xl:inline-flex shrink-0">
+              <StatusPill
+                status={project.status}
+                publishedVersion={project.publishedVersion}
+              />
+            </div>
+          )}
+        </div>
+
+        {/* Center/Right Segmented Stage Bar + Controls */}
+        <div className="flex items-center gap-2 shrink-0">
+          {/* 30px Segmented Pill Switcher */}
+          <div className="inline-flex items-center h-[30px] rounded-full bg-black/[0.04] border border-black/[0.06] p-0.5">
+            {(
+              [
+                { id: 'preview', label: '实时预览', icon: Eye },
+                { id: 'code', label: `源码 (${fileNames.length})`, icon: Code2 },
+                { id: 'cloud', label: 'Cloud 数据', icon: Database },
+                { id: 'overview', label: '概览', icon: LayoutGrid },
+              ] as const
+            ).map((tab) => {
+              const Icon = tab.icon;
+              const active = rightTab === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => setRightTab(tab.id)}
+                  className={
+                    active
+                      ? 'h-[26px] inline-flex items-center gap-1.5 rounded-full bg-white border border-black/[0.08] px-3 text-xs font-medium text-[#0c0c0c]/95 shadow-[0_1px_2px_rgba(12,12,12,0.05)] cursor-pointer'
+                      : 'h-[26px] inline-flex items-center gap-1.5 rounded-full px-2.5 text-xs font-medium text-[#0c0c0c]/55 hover:text-[#0c0c0c]/90 cursor-pointer'
+                  }
+                >
+                  <Icon className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">{tab.label}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          {rightTab === 'preview' && (
+            <div className="hidden lg:inline-flex items-center gap-0.5 rounded-full border border-black/[0.08] bg-white px-1 h-7">
+              <button
+                type="button"
+                onClick={() => setViewport('desktop')}
+                aria-label="桌面视图"
+                className={`rounded-full p-1 transition cursor-pointer ${
+                  viewport === 'desktop'
+                    ? 'bg-black/[0.06] text-[#0c0c0c]'
+                    : 'text-[#0c0c0c]/45 hover:text-[#0c0c0c]'
+                }`}
+              >
+                <Monitor className="w-3.5 h-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setViewport('mobile')}
+                aria-label="手机视图"
+                className={`rounded-full p-1 transition cursor-pointer ${
+                  viewport === 'mobile'
+                    ? 'bg-black/[0.06] text-[#0c0c0c]'
+                    : 'text-[#0c0c0c]/45 hover:text-[#0c0c0c]'
+                }`}
+              >
+                <Smartphone className="w-3.5 h-3.5" />
+              </button>
+              {activeId && (
+                <button
+                  type="button"
+                  onClick={() => void loadSnapshot(activeId)}
+                  aria-label="刷新预览"
+                  className="rounded-full p-1 text-[#0c0c0c]/45 hover:text-[#0c0c0c] cursor-pointer"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+          )}
+
+          <div className="hidden md:block">
+            <ModelDropdown
+              models={models}
+              selectedModel={selectedModel}
+              onSelect={setSelectedModel}
+              compact
+            />
+          </div>
+
+          {hasDraft && activeId && (
+            <a
+              href={`/api/projects/${activeId}/export`}
+              className="hidden sm:inline-flex h-7 items-center gap-1 rounded-full border border-black/[0.1] bg-white px-2.5 text-xs font-medium text-[#0c0c0c]/80 hover:bg-[#f8f8f6] transition"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>ZIP</span>
+            </a>
+          )}
+
+          {project && (
+            <div className="relative flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => setShareOpen((v) => !v)}
+                className="h-7 inline-flex items-center gap-1 rounded-full border border-black/[0.1] bg-white px-2.5 text-xs font-medium text-[#0c0c0c]/85 hover:bg-[#f8f8f6] transition cursor-pointer"
+              >
+                <Share2 className="w-3.5 h-3.5" />
+                <span>分享</span>
+              </button>
+
+              <button
+                type="button"
+                disabled={
+                  !hasDraft || Boolean(publishBlockReason) || Boolean(busyAction)
+                }
+                title={publishBlockReason ?? undefined}
+                onClick={() => void handlePublish()}
+                className="h-7 inline-flex items-center gap-1.5 rounded-full bg-[#4267ff] px-3.5 text-xs font-semibold text-white hover:bg-[#425ce1] transition disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+              >
+                <Rocket className="w-3.5 h-3.5" />
+                <span>{project.publishedVersion ? '更新发布' : '发布'}</span>
+              </button>
+
+              <SharePublishPopover
+                open={shareOpen}
+                onClose={() => setShareOpen(false)}
+                project={project}
+                publicUrl={snapshot?.publicUrl ?? null}
+                qrDataUrl={snapshot?.qrDataUrl ?? null}
+                hasDraft={hasDraft}
+                publishBlockReason={publishBlockReason}
+                busyAction={busyAction}
+                onPublish={() => void handlePublish()}
+              />
+            </div>
+          )}
+        </div>
+      </header>
+
+      {/* Main Split Body */}
+      <div className="flex-1 min-h-0 flex overflow-hidden">
+        {/* Optional Slide-out Project Sidebar Drawer */}
+        {workspaceSidebarOpen && (
+          <aside className="hidden md:flex w-[250px] shrink-0 flex-col border-r border-black/[0.08] bg-[#f8f8f6] p-3 space-y-3">
+            <div className="flex items-center justify-between px-1">
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-[#0c0c0c]/50">
+                全部项目
+              </span>
+              <button
+                type="button"
+                onClick={() => void handleNewBlankProject()}
+                className="inline-flex items-center gap-1 rounded-full bg-white border border-black/[0.08] px-2.5 py-1 text-[11px] font-medium text-[#4267ff] hover:bg-black/[0.02] cursor-pointer"
+              >
+                <FolderPlus className="w-3 h-3" />
+                新建
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto space-y-1">
+              {projects.map((p) => {
+                const active = p.id === activeId;
+                return (
+                  <button
+                    key={p.id}
+                    type="button"
+                    onClick={() => void openProjectInWorkspace(p.id)}
+                    className={`w-full text-left rounded-xl px-2.5 py-2 transition cursor-pointer ${
+                      active
+                        ? 'bg-white border border-black/[0.08] shadow-[0_1px_2px_rgba(12,12,12,0.04)]'
+                        : 'hover:bg-black/[0.04]'
+                    }`}
+                  >
+                    <div className="text-xs font-medium text-[#0c0c0c]/90 truncate">
+                      {p.title}
+                    </div>
+                    <div className="mt-1">
+                      <StatusPill
+                        status={p.status}
+                        publishedVersion={p.publishedVersion}
+                      />
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+            <button
+              type="button"
+              onClick={returnToLauncher}
+              className="w-full flex items-center justify-center gap-1.5 rounded-xl border border-black/[0.08] bg-white py-2 text-xs font-medium text-[#0c0c0c]/75 hover:text-[#0c0c0c] cursor-pointer"
+            >
+              <Home className="w-3.5 h-3.5" />
+              回到启动大厅
+            </button>
+          </aside>
+        )}
+
+        {/* Left Collaboration Pane */}
+        <aside className="w-full lg:w-[416px] xl:w-[452px] shrink-0 flex flex-col min-h-0 bg-[#f8f8f6] border-r border-black/[0.06]">
+          {/* Sticky 4-step Good Path Progress Card */}
+          {project && (
+            <GoodPathCard
+              project={project}
+              eventsCount={events.length}
+              hasDraft={hasDraft}
+              hasPendingPlanConfirmation={hasPendingPlanConfirmation}
+              hasPendingRaceSelection={hasPendingRaceSelection}
+              publishBlockReason={publishBlockReason}
+              busyAction={busyAction}
+              onGoPreview={() => setRightTab('preview')}
+              onPublish={() => void handlePublish()}
+            />
+          )}
+
+          {/* Scrollable Collaboration Timeline & Emma Confirmation Card */}
+          <div
+            ref={chatScrollRef}
+            className="flex-1 overflow-y-auto px-3.5 py-3 space-y-4"
+          >
+            {errorMsg && (
+              <div className="rounded-xl border border-[#c9444a]/30 bg-[#c9444a]/10 px-3 py-2.5 text-xs text-[#b72027]">
+                {errorMsg}
+              </div>
+            )}
+
+            {runtimeError && (
+              <div className="rounded-xl border border-amber-500/35 bg-amber-500/[0.09] p-3 space-y-2 text-xs text-amber-950">
+                <div className="flex items-center gap-1.5 font-semibold">
+                  <AlertTriangle className="w-4 h-4 text-amber-600" />
+                  捕获预览运行期异常
+                </div>
+                <p className="font-atoms-mono text-[11px] text-amber-900/80 break-words">
+                  {runtimeError}
+                </p>
+                <button
+                  type="button"
+                  disabled={isMutationLocked || Boolean(busyAction)}
+                  title={iterateBlockReason ?? undefined}
+                  onClick={() =>
+                    void handleIterate(`修复页面运行时错误：${runtimeError}`)
+                  }
+                  className="inline-flex items-center gap-1 rounded-full bg-[#0c0c0c] px-3 py-1 text-[11px] font-medium text-white hover:bg-[#0c0c0c]/85 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                >
+                  <Wrench className="w-3 h-3" />
+                  让 Alex 一键修复
+                </button>
+              </div>
+            )}
+
+            <TimelineStream
+              events={events}
+              onOpenPreview={() => setRightTab('preview')}
+              onOpenCode={() => setRightTab('code')}
+            />
+
+            {/* Emma Confirmation Card */}
+            {editablePlan && (
+              <div
+                className={`rounded-2xl bg-white p-3.5 space-y-3 shadow-[0_1px_4px_rgba(12,12,12,0.04)] ${
+                  hasPendingPlanConfirmation
+                    ? 'border border-[#4267ff]/45 ring-2 ring-[#4267ff]/10'
+                    : 'border border-black/[0.08]'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <AgentBadge role="emma" />
+                    <span className="text-xs font-semibold text-[#0c0c0c]/95">
+                      Emma 产品方案确认卡
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    {hasPendingPlanConfirmation ? (
+                      <span className="rounded-full bg-amber-500/12 border border-amber-600/20 px-2 py-0.5 text-[10px] font-semibold text-amber-800">
+                        {isPlanning ? '方案生成中' : '待确认新方案'}
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-700">
+                        <CheckCircle2 className="w-3 h-3" />
+                        已确认方案
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {hasPendingPlanConfirmation && hasDraft && (
+                  <div className="rounded-xl border border-amber-500/25 bg-amber-500/[0.08] px-2.5 py-2 text-[11px] text-amber-900 leading-relaxed">
+                    已有草稿与已发布线上版本在确认前保持不变；确认后 Alex 将按新方案重建草稿。
+                  </div>
+                )}
+
+                <div className="space-y-2">
+                  <input
+                    type="text"
+                    aria-label="应用名称"
+                    value={editablePlan.appName}
+                    onChange={(e) =>
+                      setEditablePlan({
+                        ...editablePlan,
+                        appName: e.target.value,
+                      })
+                    }
+                    className="w-full rounded-xl border border-black/[0.1] bg-[#fcfcfb] px-3 py-1.5 text-xs font-semibold text-[#0c0c0c]/95 focus:border-[#4267ff] focus:bg-white focus:outline-none"
+                  />
+                  <textarea
+                    rows={2}
+                    aria-label="应用摘要"
+                    value={editablePlan.summary}
+                    onChange={(e) =>
+                      setEditablePlan({
+                        ...editablePlan,
+                        summary: e.target.value,
+                      })
+                    }
+                    className="w-full rounded-xl border border-black/[0.1] bg-[#fcfcfb] px-3 py-1.5 text-xs text-[#0c0c0c]/75 focus:border-[#4267ff] focus:bg-white focus:outline-none"
+                  />
+                </div>
+
+                <div className="flex flex-wrap gap-1.5">
+                  {ALL_CAPABILITIES.map((cap) => {
+                    const active = editablePlan.capabilities.includes(cap.id);
+                    return (
+                      <button
+                        key={cap.id}
+                        type="button"
+                        onClick={() => toggleCapability(cap.id)}
+                        className={
+                          active
+                            ? 'rounded-full bg-[#4267ff]/12 border border-[#4267ff]/30 px-2.5 py-0.5 text-[11px] font-medium text-[#4267ff] cursor-pointer'
+                            : 'rounded-full border border-black/[0.08] bg-[#f8f8f6] px-2.5 py-0.5 text-[11px] text-[#0c0c0c]/55 hover:text-[#0c0c0c] cursor-pointer'
+                        }
+                      >
+                        {cap.label}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Linear vs Race Mode Segmented Switch */}
+                <div className="grid grid-cols-2 rounded-full bg-black/[0.04] p-0.5 border border-black/[0.06]">
+                  <button
+                    type="button"
+                    onClick={() => setBuildMode('linear')}
+                    className={
+                      buildMode === 'linear'
+                        ? 'rounded-full bg-white py-1.5 text-xs font-medium text-[#0c0c0c] shadow-[0_1px_2px_rgba(12,12,12,0.06)] cursor-pointer'
+                        : 'rounded-full py-1.5 text-xs text-[#0c0c0c]/55 hover:text-[#0c0c0c] cursor-pointer'
+                    }
+                  >
+                    标准单路生成
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setBuildMode('race')}
+                    className={
+                      buildMode === 'race'
+                        ? 'rounded-full bg-white py-1.5 text-xs font-medium text-[#4267ff] shadow-[0_1px_2px_rgba(12,12,12,0.06)] inline-flex items-center justify-center gap-1 cursor-pointer'
+                        : 'rounded-full py-1.5 text-xs text-[#0c0c0c]/55 hover:text-[#0c0c0c] inline-flex items-center justify-center gap-1 cursor-pointer'
+                    }
+                  >
+                    <Zap className="w-3.5 h-3.5 text-amber-500" />
+                    Race Mode (双风格)
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  disabled={Boolean(busyAction) || isPlanning || isBuilding}
+                  onClick={() => void handleConfirmAndBuild()}
+                  className="w-full rounded-full bg-[#4267ff] px-4 py-2 text-xs font-semibold text-white hover:bg-[#425ce1] transition disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer"
+                >
+                  {busyAction || '确认方案并让 Alex 开始构建'}
+                </button>
+              </div>
+            )}
+
+            {busyAction && (
+              <div className="inline-flex items-center gap-2 rounded-full border border-[#4267ff]/20 bg-white px-3 py-1.5 text-[11px] font-medium text-[#4267ff] shadow-xs">
+                <RefreshCw className="w-3 h-3 animate-spin" />
+                {busyAction}
+              </div>
+            )}
+          </div>
+
+          {/* Bottom Unified Composer */}
+          <div className="shrink-0 p-3 pt-2 space-y-2 bg-[#f8f8f6]">
+            {/* Quick Suggestion Chips */}
+            {effectiveComposerMode === 'iterate' && (
+              <div className="flex flex-wrap gap-1.5">
+                {['主色调改成深蓝色', '增加导出 CSV 按钮'].map((chip) => (
+                  <button
+                    key={chip}
+                    type="button"
+                    disabled={isMutationLocked || Boolean(busyAction)}
+                    onClick={() => setComposerText(chip)}
+                    className="rounded-full border border-black/[0.08] bg-white px-2.5 py-1 text-[11px] font-medium text-[#0c0c0c]/75 hover:border-[#4267ff]/40 hover:text-[#4267ff] transition disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                  >
+                    + {chip}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                void handleWorkspaceComposerSubmit();
+              }}
+              className="atoms-composer rounded-2xl overflow-hidden"
+            >
+              {effectiveComposerMode === 'iterate' && iterateBlockReason && (
+                <div className="border-b border-amber-500/20 bg-amber-500/[0.08] px-3 py-2 text-[11px] text-amber-900 leading-relaxed">
+                  {hasPendingPlanConfirmation
+                    ? '当前存在待确认的新方案，请先在上方 Emma 方案确认卡中点击「确认方案并让 Alex 开始构建」；确认前已有草稿与已发布线上站点保持不变，无法迭代或发布。'
+                    : iterateBlockReason}
+                </div>
+              )}
+
+              <div className="p-3 space-y-2.5">
+                <textarea
+                  rows={2}
+                  disabled={composerLocked}
+                  value={composerText}
+                  onChange={(e) => setComposerText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      if (canSubmitComposer) {
+                        void handleWorkspaceComposerSubmit();
+                      }
+                    }
+                  }}
+                  placeholder={
+                    effectiveComposerMode === 'restart'
+                      ? '输入新的产品想法（将启动 Iris 调研 → Emma 方案确认）...'
+                      : hasPendingPlanConfirmation
+                        ? isPlanning
+                          ? 'Iris / Emma 正在生成新方案，请等待确认后再迭代...'
+                          : '请先在上方确认 Emma 新方案并构建...'
+                        : hasPendingRaceSelection
+                          ? '请先在右侧选择一个 Race Mode 候选方案...'
+                          : isBuilding
+                            ? 'Alex 正在构建中，请稍候...'
+                            : '继续向 AI 团队描述调整需求（不影响已发布线上版本）...'
+                  }
+                  className="w-full resize-none bg-transparent text-xs leading-relaxed text-[#0c0c0c]/95 placeholder:text-[#0c0c0c]/35 focus:outline-none disabled:opacity-50"
+                />
+
+                <div className="flex items-center justify-between gap-2 pt-0.5">
+                  {/* Mode Switch inside Composer Footer */}
+                  {hasDraft ? (
+                    <div className="inline-flex items-center rounded-full bg-black/[0.04] p-0.5 border border-black/[0.05]">
+                      <button
+                        type="button"
+                        onClick={() => setComposerMode('iterate')}
+                        className={
+                          effectiveComposerMode === 'iterate'
+                            ? 'rounded-full bg-white px-2.5 py-1 text-[11px] font-medium text-[#0c0c0c] shadow-[0_1px_2px_rgba(12,12,12,0.06)] cursor-pointer'
+                            : 'rounded-full px-2.5 py-1 text-[11px] text-[#0c0c0c]/55 hover:text-[#0c0c0c] cursor-pointer'
+                        }
+                      >
+                        迭代当前应用
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setComposerMode('restart')}
+                        className={
+                          effectiveComposerMode === 'restart'
+                            ? 'rounded-full bg-white px-2.5 py-1 text-[11px] font-medium text-[#4267ff] shadow-[0_1px_2px_rgba(12,12,12,0.06)] cursor-pointer'
+                            : 'rounded-full px-2.5 py-1 text-[11px] text-[#0c0c0c]/55 hover:text-[#0c0c0c] cursor-pointer'
+                        }
+                      >
+                        换新想法重规划
+                      </button>
+                    </div>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 text-[11px] text-[#0c0c0c]/45">
+                      <Sparkles className="w-3 h-3 text-[#4267ff]" />
+                      Iris → Emma → Alex 协同流程
+                    </span>
+                  )}
+
+                  <button
+                    type="submit"
+                    aria-label={
+                      effectiveComposerMode === 'restart'
+                        ? '启动 AI 团队规划'
+                        : '发送迭代指令'
+                    }
+                    title={
+                      effectiveComposerMode === 'iterate'
+                        ? iterateBlockReason ?? undefined
+                        : undefined
+                    }
+                    disabled={!canSubmitComposer}
+                    className="h-8 px-3 rounded-[10px] bg-[#4267ff] text-white inline-flex items-center justify-center gap-1 text-xs font-medium hover:bg-[#425ce1] transition disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer"
+                  >
+                    {effectiveComposerMode === 'restart' ? (
+                      <span>启动规划</span>
+                    ) : (
+                      <span>迭代</span>
+                    )}
+                    <ArrowUp className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+            </form>
+          </div>
+        </aside>
+
+        {/* Right Stage Canvas */}
+        <main className="flex-1 min-w-0 bg-[#f3f3f0] p-2.5 flex flex-col min-h-0">
+          {rightTab === 'preview' && (
+            <div className="flex-1 min-h-0 flex flex-col rounded-2xl border border-black/[0.08] bg-white shadow-[0_2px_10px_rgba(12,12,12,0.04)] overflow-hidden">
+              {/* Simulated Browser Chrome / Pending Notices */}
+              {raceBranches.length > 0 ? (
+                <div className="border-b border-amber-500/20 bg-amber-500/[0.07] px-4 py-2.5 flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 text-xs font-medium text-amber-900">
+                    <Zap className="w-4 h-4 text-amber-500" />
+                    Race Mode 双方案对比：请先采用一个方案合入草稿，方可迭代或发布
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {raceBranches.map((br) => {
+                      const usable =
+                        Boolean(br.previewHtml) && br.errors.length === 0;
+                      return (
+                        <button
+                          key={br.branchId}
+                          type="button"
+                          disabled={!usable || Boolean(busyAction)}
+                          onClick={() => void handleSelectBranch(br.branchId)}
+                          className="rounded-full border border-black/[0.1] bg-white px-3 py-1 text-xs font-medium text-[#0c0c0c]/90 hover:border-[#4267ff] hover:text-[#4267ff] transition disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                        >
+                          {usable ? `采用 ${br.label}` : `${br.label} 编译失败`}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : (
+                hasPendingPlanConfirmation &&
+                hasDraft && (
+                  <div className="border-b border-amber-500/20 bg-amber-500/[0.07] px-4 py-2 text-xs text-amber-900">
+                    新方案待确认：当前展示已有草稿预览，确认 Emma 新方案前草稿与先前的独立发布页均保持不变。
+                  </div>
+                )
+              )}
+
+              {snapshot?.previewHtml && raceBranches.length === 0 && (
+                <div className="h-9 shrink-0 border-b border-black/[0.06] bg-[#fcfcfb] px-3.5 flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="font-atoms-mono text-[11px] rounded-full bg-black/[0.04] px-2.5 py-0.5 text-[#0c0c0c]/65 truncate">
+                      {project?.publishedVersion
+                        ? `/s/${project.slug}`
+                        : '本地内存沙箱实时预览'}
+                    </span>
+                  </div>
+                  {project?.publishedVersion ? (
+                    <a
+                      href={`/s/${project.slug}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-1 text-[11px] font-medium text-[#4267ff] hover:underline shrink-0"
+                    >
+                      打开线上 v{project.publishedVersion}
+                      <ExternalLink className="w-3 h-3" />
+                    </a>
+                  ) : null}
+                </div>
+              )}
+
+              {raceBranches.length > 0 ? (
+                <div className="flex-1 grid grid-cols-1 md:grid-cols-2 gap-3 p-3 bg-[#f8f8f6] min-h-0">
+                  {raceBranches.map((br) => {
+                    const usable =
+                      Boolean(br.previewHtml) && br.errors.length === 0;
+                    return (
+                      <div
+                        key={br.branchId}
+                        className="flex flex-col rounded-xl border border-black/[0.08] bg-white overflow-hidden min-h-0 shadow-[0_1px_4px_rgba(12,12,12,0.04)]"
+                      >
+                        <div className="h-10 shrink-0 bg-[#fcfcfb] px-3 flex items-center justify-between border-b border-black/[0.06]">
+                          <span className="text-xs font-semibold text-[#0c0c0c]/90">
+                            {br.label}
+                          </span>
+                          <button
+                            type="button"
+                            disabled={!usable || Boolean(busyAction)}
+                            onClick={() => void handleSelectBranch(br.branchId)}
+                            className="rounded-full bg-[#4267ff] px-3 py-1 text-[11px] font-semibold text-white hover:bg-[#425ce1] disabled:bg-black/15 disabled:text-black/40 disabled:cursor-not-allowed cursor-pointer"
+                          >
+                            {usable ? '采用此方案' : '编译失败不可采用'}
+                          </button>
+                        </div>
+                        {br.previewHtml ? (
+                          <iframe
+                            title={br.label}
+                            srcDoc={br.previewHtml}
+                            sandbox="allow-scripts allow-forms allow-popups allow-modals"
+                            className="w-full flex-1 bg-white"
+                          />
+                        ) : (
+                          <div className="p-4 text-xs text-[#b72027]">
+                            编译失败：{br.errors.map((e) => e.message).join('; ')}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : snapshot?.previewHtml ? (
+                <div className="flex-1 min-h-0 w-full flex items-center justify-center bg-[#f8f8f6] p-3">
+                  <iframe
+                    title="应用实时预览"
+                    srcDoc={snapshot.previewHtml}
+                    sandbox="allow-scripts allow-forms allow-popups allow-modals"
+                    className={
+                      viewport === 'mobile'
+                        ? 'w-[390px] h-full max-h-[844px] rounded-[28px] border-[6px] border-[#0c0c0c]/85 bg-white shadow-xl'
+                        : 'w-full h-full rounded-xl border border-black/[0.06] bg-white'
+                    }
+                  />
+                </div>
+              ) : (
+                <div className="flex-1 flex flex-col items-center justify-center p-8 text-center space-y-3 bg-[#fcfcfb]">
+                  <div className="w-12 h-12 rounded-2xl border border-black/[0.08] bg-white flex items-center justify-center shadow-xs">
+                    <Sparkles className="w-5 h-5 text-[#4267ff]" />
+                  </div>
+                  <h2 className="text-sm font-semibold text-[#0c0c0c]/90">
+                    等待构建首版应用预览
+                  </h2>
+                  <p className="text-xs text-[#0c0c0c]/55 max-w-md leading-relaxed">
+                    {hasPendingPlanConfirmation
+                      ? '请在左侧 Emma 产品方案确认卡中审阅需求，点击「确认方案并让 Alex 开始构建」即可在此处渲染实时交互预览。'
+                      : '在左侧输入产品想法后，Iris 将完成调研、Emma 给出确认卡，Alex 编译完成后将在此自动呈现。'}
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {rightTab === 'code' && (
+            <div className="flex-1 min-h-0 grid grid-cols-12 rounded-2xl border border-black/[0.08] bg-white overflow-hidden shadow-[0_2px_10px_rgba(12,12,12,0.04)]">
+              {/* Light File Tree (~240px on desktop) */}
+              <div className="col-span-12 md:col-span-4 lg:col-span-3 border-b md:border-b-0 md:border-r border-black/[0.06] bg-[#f8f8f6] flex flex-col min-h-0">
+                <div className="p-2.5 border-b border-black/[0.06]">
+                  <div className="relative">
+                    <Search className="w-3.5 h-3.5 text-[#0c0c0c]/40 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      value={fileFilter}
+                      onChange={(e) => setFileFilter(e.target.value)}
+                      placeholder="搜索源码文件..."
+                      className="w-full rounded-lg border border-black/[0.08] bg-white pl-8 pr-2.5 py-1.5 text-xs text-[#0c0c0c]/85 placeholder:text-[#0c0c0c]/35 focus:border-[#4267ff] focus:outline-none"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex-1 overflow-y-auto p-2 space-y-0.5">
+                  {filteredFileNames.length === 0 ? (
+                    <p className="text-xs text-[#0c0c0c]/45 p-3 text-center">
+                      {fileNames.length === 0
+                        ? '尚未生成源码文件'
+                        : '没有匹配的文件'}
+                    </p>
+                  ) : (
+                    filteredFileNames.map((filePath) => {
+                      const active = selectedFile === filePath;
+                      return (
+                        <button
+                          key={filePath}
+                          type="button"
+                          onClick={() => {
+                            setSelectedFile(filePath);
+                            setIsEditingCode(false);
+                            setCodeSaveBanner(null);
+                            setCodeCompileErrors([]);
+                          }}
+                          className={
+                            active
+                              ? 'w-full text-left flex items-center gap-2 rounded-lg bg-[#4267ff]/12 px-2.5 py-1.5 text-xs font-atoms-mono font-medium text-[#4267ff] cursor-pointer'
+                              : 'w-full text-left flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-xs font-atoms-mono text-[#0c0c0c]/70 hover:bg-black/[0.04] hover:text-[#0c0c0c] cursor-pointer'
+                          }
+                        >
+                          <FileCode className="w-3.5 h-3.5 shrink-0" />
+                          <span className="truncate">{filePath}</span>
+                        </button>
+                      );
+                    })
+                  )}
+                </div>
+
+                {hasDraft && activeId && (
+                  <div className="p-2.5 border-t border-black/[0.06]">
+                    <a
+                      href={`/api/projects/${activeId}/export`}
+                      className="w-full inline-flex items-center justify-center gap-1.5 rounded-full border border-black/[0.1] bg-white py-1.5 text-xs font-medium text-[#0c0c0c]/85 hover:bg-black/[0.03] transition"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      导出项目 ZIP
+                    </a>
+                  </div>
+                )}
+              </div>
+
+              {/* Light High-Contrast Code Viewer & Inline Editor */}
+              <div className="col-span-12 md:col-span-8 lg:col-span-9 flex flex-col min-h-0 bg-white">
+                {selectedFile && selectedFile in draftFiles ? (
+                  <>
+                    <div className="h-10 shrink-0 border-b border-black/[0.06] bg-[#fcfcfb] px-4 flex items-center justify-between gap-2 text-xs">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="font-atoms-mono font-medium text-[#0c0c0c]/85 truncate">
+                          {selectedFile}
+                        </span>
+                        {isEditingCode && (
+                          <span className="rounded-full bg-[#4267ff]/10 px-2 py-0.5 text-[10px] font-medium text-[#4267ff] shrink-0">
+                            编辑中
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            void navigator.clipboard.writeText(
+                              isEditingCode
+                                ? codeDraft
+                                : (draftFiles[selectedFile] ?? '')
+                            );
+                            setCopiedCode(true);
+                            setTimeout(() => setCopiedCode(false), 1500);
+                          }}
+                          className="inline-flex items-center gap-1 rounded-full border border-black/[0.08] bg-white px-2.5 py-1 text-[11px] font-medium text-[#0c0c0c]/75 hover:text-[#0c0c0c] cursor-pointer"
+                        >
+                          {copiedCode ? (
+                            <Check className="w-3 h-3 text-emerald-600" />
+                          ) : (
+                            <Copy className="w-3 h-3" />
+                          )}
+                          {copiedCode ? '已复制' : '复制代码'}
+                        </button>
+
+                        {isEditingCode ? (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setIsEditingCode(false);
+                                setCodeDraft(draftFiles[selectedFile] ?? '');
+                                setCodeCompileErrors([]);
+                                setCodeSaveBanner(null);
+                              }}
+                              className="inline-flex items-center gap-1 rounded-full border border-black/[0.08] bg-white px-2.5 py-1 text-[11px] font-medium text-[#0c0c0c]/70 hover:text-[#0c0c0c] cursor-pointer"
+                            >
+                              <X className="w-3 h-3" />
+                              取消
+                            </button>
+                            <button
+                              type="button"
+                              disabled={
+                                savingCode ||
+                                isMutationLocked ||
+                                Boolean(busyAction)
+                              }
+                              title={iterateBlockReason ?? undefined}
+                              onClick={() => void handleSaveSourceCode()}
+                              className="inline-flex items-center gap-1 rounded-full bg-[#4267ff] px-3 py-1 text-[11px] font-semibold text-white hover:bg-[#425ce1] transition disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                            >
+                              <Save className="w-3 h-3" />
+                              {savingCode ? '编译中...' : '保存并重新编译'}
+                            </button>
+                          </>
+                        ) : (
+                          <button
+                            type="button"
+                            disabled={isMutationLocked || Boolean(busyAction)}
+                            title={iterateBlockReason ?? undefined}
+                            onClick={() => {
+                              setCodeDraft(draftFiles[selectedFile] ?? '');
+                              setCodeSaveBanner(null);
+                              setCodeCompileErrors([]);
+                              setIsEditingCode(true);
+                            }}
+                            className="inline-flex items-center gap-1 rounded-full border border-black/[0.1] bg-white px-2.5 py-1 text-[11px] font-medium text-[#0c0c0c]/85 hover:border-[#4267ff]/40 hover:text-[#4267ff] disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                          >
+                            <Pencil className="w-3 h-3" />
+                            编辑源码
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {codeSaveBanner && (
+                      <div
+                        className={`border-b px-4 py-2 text-xs flex items-center justify-between gap-2 ${
+                          codeSaveBanner.ok
+                            ? 'border-emerald-600/20 bg-emerald-500/[0.08] text-emerald-800'
+                            : 'border-[#c9444a]/25 bg-[#c9444a]/10 text-[#b72027]'
+                        }`}
+                      >
+                        <span>{codeSaveBanner.message}</span>
+                        {codeSaveBanner.ok && (
+                          <button
+                            type="button"
+                            onClick={() => setRightTab('preview')}
+                            className="font-semibold text-[#4267ff] hover:underline shrink-0 cursor-pointer"
+                          >
+                            去预览查看 →
+                          </button>
+                        )}
+                      </div>
+                    )}
+
+                    {codeCompileErrors.length > 0 && (
+                      <div className="border-b border-[#c9444a]/20 bg-[#c9444a]/[0.05] px-4 py-2.5 space-y-1 text-[11px] text-[#b72027]">
+                        {codeCompileErrors.map((err, idx) => (
+                          <div key={idx} className="font-atoms-mono">
+                            {err.file ? `${err.file}` : selectedFile}
+                            {err.line ? `:${err.line}` : ''} — {err.message}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {isEditingCode ? (
+                      <textarea
+                        aria-label="在线源码编辑器"
+                        value={codeDraft}
+                        onChange={(e) => setCodeDraft(e.target.value)}
+                        spellCheck={false}
+                        className="flex-1 w-full resize-none bg-[#fcfcfb] p-4 font-atoms-mono text-xs leading-6 text-[#0c0c0c]/90 focus:outline-none"
+                      />
+                    ) : (
+                      <div className="flex-1 overflow-auto p-4 font-atoms-mono text-xs leading-6">
+                        {codeLines.map((line, i) => (
+                          <div key={i} className="flex gap-4 hover:bg-black/[0.02]">
+                            <span className="w-8 shrink-0 select-none text-right text-[#0c0c0c]/30 tabular-nums">
+                              {i + 1}
+                            </span>
+                            <span className="whitespace-pre text-[#0c0c0c]/90">
+                              {line || ' '}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <div className="h-full flex items-center justify-center text-xs text-[#0c0c0c]/45">
+                    请选择左侧源码文件查看内容
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {rightTab === 'cloud' && (
+            <div className="flex-1 min-h-0 rounded-2xl border border-black/[0.08] bg-white overflow-hidden shadow-[0_2px_10px_rgba(12,12,12,0.04)]">
+              {activeId ? (
+                <CloudDataPanel projectId={activeId} />
+              ) : (
+                <div className="h-full flex flex-col items-center justify-center p-8 text-center space-y-2 text-xs text-[#0c0c0c]/50">
+                  <Database className="w-6 h-6 text-[#0c0c0c]/30" />
+                  <p>请先创建或选择一个项目，即可查看 Cloud 持久化数据与注册用户。</p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {rightTab === 'overview' && project && (
+            <div className="flex-1 min-h-0 overflow-y-auto rounded-2xl border border-black/[0.08] bg-[#fcfcfb] p-6 shadow-[0_2px_10px_rgba(12,12,12,0.04)]">
+              <div className="max-w-3xl mx-auto space-y-5">
+                <div className="flex flex-wrap items-start justify-between gap-4">
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2">
+                      <h2 className="text-lg font-semibold text-[#0c0c0c]/95">
+                        {project.title}
+                      </h2>
+                      <StatusPill
+                        status={project.status}
+                        publishedVersion={project.publishedVersion}
+                      />
+                    </div>
+                    <p className="text-xs text-[#0c0c0c]/60 max-w-xl leading-relaxed">
+                      {project.plan?.summary ?? '等待完成产品规划与构建后展示应用摘要。'}
+                    </p>
+                  </div>
+                </div>
+
+                {/* Publish Hero Bento Card */}
+                <div className="rounded-2xl border border-black/[0.08] bg-white p-5 flex flex-wrap items-center justify-between gap-4 shadow-[0_1px_4px_rgba(12,12,12,0.03)]">
+                  <div className="space-y-1">
+                    <div className="text-sm font-semibold text-[#0c0c0c]/95">
+                      {project.publishedVersion > 0
+                        ? `当前线上版本：v${project.publishedVersion}`
+                        : '准备就绪后可发布独立生产站点'}
+                    </div>
+                    <p className="text-xs text-[#0c0c0c]/55">
+                      {publishBlockReason ??
+                        '发布后通过 /s/[slug] 独立输出生产级 HTML，与草稿编辑严格隔离。'}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={
+                      !hasDraft ||
+                      Boolean(publishBlockReason) ||
+                      Boolean(busyAction)
+                    }
+                    title={publishBlockReason ?? undefined}
+                    onClick={() => void handlePublish()}
+                    className="rounded-full bg-[#0c0c0c] px-5 py-2 text-xs font-semibold text-white hover:bg-[#0c0c0c]/85 transition disabled:opacity-35 disabled:cursor-not-allowed cursor-pointer"
+                  >
+                    {project.publishedVersion > 0 ? '更新发布应用' : '发布应用'}
+                  </button>
+                </div>
+
+                {/* Structured Overview Cards */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+                  <div className="rounded-xl border border-black/[0.08] bg-white p-4 space-y-2">
+                    <div className="text-xs font-semibold text-[#0c0c0c]/85">
+                      独立访问地址 & 二维码
+                    </div>
+                    {project.publishedVersion > 0 && snapshot?.publicUrl ? (
+                      <div className="space-y-2">
+                        <a
+                          href={snapshot.publicUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="inline-flex items-center gap-1 font-atoms-mono text-xs text-[#4267ff] hover:underline break-all"
+                        >
+                          {snapshot.publicUrl}
+                          <ExternalLink className="w-3 h-3 shrink-0" />
+                        </a>
+                      </div>
+                    ) : (
+                      <p className="text-xs text-[#0c0c0c]/50">
+                        尚未发布，目标路径：<span className="font-atoms-mono">/s/{project.slug}</span>
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="rounded-xl border border-black/[0.08] bg-white p-4 space-y-1.5">
+                    <div className="text-xs font-semibold text-[#0c0c0c]/85">
+                      SEO 与社媒 OpenGraph
+                    </div>
+                    <div className="text-xs text-[#0c0c0c]/80 font-medium truncate">
+                      {project.plan?.seo?.title ?? project.title}
+                    </div>
+                    <p className="text-[11px] text-[#0c0c0c]/55 line-clamp-2">
+                      {project.plan?.seo?.description ??
+                        project.plan?.summary ??
+                        '发布时自动注入 <title> 与 og:title / og:description 标签'}
+                    </p>
+                  </div>
+
+                  <div className="rounded-xl border border-black/[0.08] bg-white p-4 space-y-2">
+                    <div className="text-xs font-semibold text-[#0c0c0c]/85">
+                      @atoms/cloud 已启用能力
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {project.capabilities.map((cap) => (
+                        <span
+                          key={cap}
+                          className="rounded-full bg-[#4267ff]/10 px-2.5 py-0.5 text-[11px] font-medium text-[#4267ff] uppercase"
+                        >
+                          {cap}
+                        </span>
+                      ))}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setRightTab('cloud')}
+                      className="text-[11px] font-medium text-[#4267ff] hover:underline cursor-pointer"
+                    >
+                      查看实时持久化集合与用户 →
+                    </button>
+                  </div>
+
+                  <div className="rounded-xl border border-black/[0.08] bg-white p-4 space-y-2">
+                    <div className="text-xs font-semibold text-[#0c0c0c]/85">
+                      源码文件与导出
+                    </div>
+                    <p className="text-xs text-[#0c0c0c]/55">
+                      当前草稿包含 {fileNames.length} 个源码文件，支持在线浏览与整站 ZIP 下载。
+                    </p>
+                    {hasDraft && (
+                      <div className="flex items-center gap-3">
+                        <button
+                          type="button"
+                          onClick={() => setRightTab('code')}
+                          className="text-[11px] font-medium text-[#4267ff] hover:underline cursor-pointer"
+                        >
+                          浏览源码 →
+                        </button>
+                        <a
+                          href={`/api/projects/${project.id}/export`}
+                          className="text-[11px] font-medium text-[#0c0c0c]/75 hover:underline"
+                        >
+                          下载 ZIP
+                        </a>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+        </main>
+      </div>
+    </div>
+  );
+}

@@ -1,0 +1,75 @@
+# Mini Atoms Demo（路线 A+）
+
+面向极速交付与全栈商业化闭环的 **Mini Atoms** 工作台与运行时实现：
+
+> **一句话产品想法 → Iris 深度调研 → Emma 产品规划（硬确认门禁 + Race Mode 双路择优）→ Alex 全栈生成 + 内存 Esbuild 编译自愈（≤2 轮）→ `@atoms/cloud` 真实持久化（db / auth / billing / ai）→ 源码在线编辑重编译 → 一键发布独立 `/s/[slug]` 生产站点（真 SEO/OG + 二维码 + ZIP 导出）。**
+
+---
+
+## 核心特性概览
+
+1. **Atoms 暖纸白双态工作台（免登录直接用）**
+   - **启动大厅**：`270px` 可折叠侧栏 + 居中团队头像与凹槽提示词台 + 推荐场景卡片 + 项目列表（支持卡片内二次确认删除）。
+   - **沉浸双栏工作台**：`44px` 统一顶栏 + 可切换模型下拉 + 左侧聚合协作流（Iris 调研卡 / Emma 方案确认卡 / Alex 折叠步骤与虚线时间轴 / `持续构建 4 步进度卡` / 统一底部 Composer）+ 右侧四视图舞台（`实时预览 | 源码 | Cloud 数据 | 概览`）。
+   - **严格状态隔离与门禁保护**：待确认方案（`researching` / `planning` / `awaiting_confirmation`）及 Race Mode 未选定分支期间，工作台与服务端一致拦截 `409` 迭代/编辑/发布，已有草稿与已发布 `/s/[slug]` 站点数据保持 100% 隔离不受影响。
+
+2. **源码在线编辑 + 编译自愈闭环**
+   - 支持在工作台「源码」Tab 直接修改代码并触发内存 `esbuild` + Tailwind CSS v4 重新编译，即时更新右侧草稿预览，同时保持线上发布版稳定。
+   - AI 编码阶段内建 ≤2 轮自动编译修复，预览态注入 `RuntimeErrorBoundary` 与 `window.postMessage` 异常一键修复机制。
+
+3. **统一 `@atoms/cloud` BaaS 与商业闭环**
+   - 默认内置 **`PGlite`**（`.data/pglite`）实现开箱即用的 PostgreSQL 持久化，线上配置 `STORAGE_ADAPTER=postgres` + `DATABASE_URL` 无缝切换云 Postgres（Neon / Supabase / 自建 pg）。
+   - 内置每项目严格隔离的终端用户注册/登录/Bearer Token 鉴权、JSONB 集合增删查、**Mock + Creem Test Mode** HMAC Webhook 验签幂等升级、以及 AI 代理口。
+
+4. **独立生产站点直出与部署就绪**
+   - `/s/[slug]` 无编辑器外壳直出生产 HTML，自动注入真实 `<title>`、`description` 与 Open Graph 元信息。
+   - `resolvePublicBaseUrl` 支持从反向代理请求头 / `VERCEL_URL` 自动推导公网地址（显式设置 `APP_BASE_URL` 时优先使用）。
+
+---
+
+## 快速启动与验证
+
+### 环境变量配置（`.env.local`）
+参考 [.env.example](./.env.example)：
+- 离线默认模式无需配置任何外部密钥即可完整跑通（`LLM_ADAPTER=mock`、`STORAGE_ADAPTER=pglite`、`BILLING_ADAPTER=mock`）。
+- 接入真实大模型时填入 `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `DEEPSEEK_API_KEY` 并设 `LLM_ADAPTER=vercel-ai`。
+- 部署云端 Postgres 时设 `STORAGE_ADAPTER=postgres` 并填入 `DATABASE_URL`。
+
+### 常用命令（Windows `Node v24.18.1`）
+
+```powershell
+# 类型检查
+npm run typecheck
+
+# 运行全量 L1 契约与 L2 PGlite 持久化/路由集成测试
+npm test
+
+# 构建生产包
+npm run build
+
+# 运行端到端 HTTP 冒烟脚本（起真实 next start + PGlite + Esbuild）
+node scripts/e2e-http-smoke.mjs
+
+# 启动本地生产服务（默认 http://localhost:3000）
+npm run start
+```
+
+---
+
+## 目录与文档索引
+
+- **调研、设计与交付文档（`docs/`）**：
+  - [01 - Atoms 产品调研与竞品分析](./docs/01-atoms-research.md)
+  - [02 - Demo 范围界定与关键技术取舍](./docs/02-demo-scope-and-tradeoffs.md)
+  - [03 - 路线 A+ 完整架构设计与三层测试闭环](./docs/03-architecture-design.md)
+  - [04 - 本机 WSL2 开发环境连通性与配置说明](./docs/04-wsl2-dev-env.md)
+  - [05 - Atoms 实测使用体验报告与视觉排版规范](./docs/05-atoms-ux-visual-audit.md)
+  - [06 - 最终成品交付清单与两阶段实施规划](./docs/06-delivery-checklist.md)
+  - [07 - 国内环境外部依赖调研与组件选型指南](./docs/07-china-external-dependencies-research.md)
+- **核心架构目录（Ports & Adapters）**：
+  - `src/domain/`：领域契约（零外部依赖 TypeScript）
+  - `src/ports/`：五大核心端口抽象
+  - `src/core/`：SOP 状态机、共享门禁守卫、`@atoms/cloud` 客户端 SDK
+  - `src/adapters/`：Mock / Vercel AI LLM、Esbuild 内存构建、InMemory / PGlite / Pg 存储、Mock / Creem 支付、同域发布器
+  - `src/container.ts`：环境变量驱动的容器装配
+  - `src/app/` & `src/components/`：Next.js 15 App Router API 与 Atoms 风格工作台前端
