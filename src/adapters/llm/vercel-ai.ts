@@ -34,11 +34,14 @@ function extractJsonObjectText(raw: string): string {
 }
 
 function sanitizeErrorMessage(err: unknown): string {
-  const raw = err instanceof Error ? err.message : String(err);
+  const raw = (err instanceof Error ? err.message : String(err)).slice(0, 1000);
   return raw
-    .replace(/\b(sk-[A-Za-z0-9_-]{6,})/g, 'sk-***')
+    .replace(/\bsk-[A-Za-z0-9_-]{6,}/g, 'sk-***')
     .replace(/\b(Bearer\s+)[A-Za-z0-9._-]+/gi, '$1***')
-    .replace(/([A-Za-z0-9_]*key\s*[:=]\s*)['"]?[^\s'",;]+/gi, '$1***')
+    .replace(
+      /((?:"|')?(?:api[_-]?key|access[_-]?token|auth[_-]?secret|authorization|token|secret)(?:"|')?\s*[:=]\s*(?:"|')?)[^\s'",;}\]]+/gi,
+      '$1***'
+    )
     .slice(0, 400);
 }
 
