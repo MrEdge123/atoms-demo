@@ -349,7 +349,10 @@ async function main() {
     const iterRes = await fetch(`${BASE_URL}/api/projects/${project.id}/iterate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ instruction: '把主色调改成深蓝色，并增加导出 CSV 按钮' }),
+      body: JSON.stringify({
+        instruction: '把主色调改成深蓝色，并增加导出 CSV 按钮',
+        model: 'mock-default',
+      }),
     });
     const iterEvents = await readSseEvents(iterRes);
     assert.ok(iterEvents.some((e) => e.type === 'build_result' && e.payload.ok === true));
@@ -404,7 +407,10 @@ async function main() {
     const iterA2Res = await fetch(`${BASE_URL}/api/projects/${project.id}/iterate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ instruction: '将主色调调整为深蓝色' }),
+      body: JSON.stringify({
+        instruction: '将主色调调整为深蓝色',
+        model: 'mock-default',
+      }),
     });
     const iterA2Events = await readSseEvents(iterA2Res);
     assert.ok(iterA2Events.some((e) => e.type === 'build_result' && e.payload.ok === true));
@@ -521,7 +527,10 @@ async function main() {
     const iterAfterGateRes = await fetch(`${BASE_URL}/api/projects/${project.id}/iterate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ instruction: '主色调改成深蓝色' }),
+      body: JSON.stringify({
+        instruction: '主色调改成深蓝色',
+        model: 'mock-default',
+      }),
     });
     const iterAfterGateEvents = await readSseEvents(iterAfterGateRes);
     assert.ok(

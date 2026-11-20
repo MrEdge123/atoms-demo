@@ -81,15 +81,15 @@ function main() {
 
   // Ensure real LLM mode and live-verified vendor defaults are present
   lines = upsertEnvVar(lines, 'LLM_ADAPTER', 'vercel-ai');
-  lines = upsertEnvVar(lines, 'DEFAULT_LLM_MODEL', 'deepseek:deepseek-v4-pro');
+  lines = upsertEnvVar(lines, 'DEFAULT_LLM_MODEL', 'deepseek:deepseek-flash');
   if (!lines.some((l) => l.startsWith('DEEPSEEK_BASE_URL='))) {
     lines = upsertEnvVar(lines, 'DEEPSEEK_BASE_URL', 'https://api.deepseek.com/v1');
   }
-  lines = upsertEnvVar(lines, 'DEEPSEEK_MODEL', 'deepseek-v4-pro');
+  lines = upsertEnvVar(lines, 'DEEPSEEK_MODEL', 'deepseek-flash,deepseek-v4-pro');
   if (!lines.some((l) => l.startsWith('KIMI_BASE_URL='))) {
     lines = upsertEnvVar(lines, 'KIMI_BASE_URL', 'https://api.moonshot.cn/v1');
   }
-  lines = upsertEnvVar(lines, 'KIMI_MODEL', 'kimi-k2.7-code');
+  lines = upsertEnvVar(lines, 'KIMI_MODEL', 'kimi-k2.7-code-highspeed,kimi-k2.7-code');
 
   fs.writeFileSync(ENV_LOCAL_PATH, `${lines.join('\n')}\n`, 'utf8');
   console.log('Synced API credentials to .env.local (masked):');

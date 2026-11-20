@@ -21,7 +21,7 @@ export interface VercelAIEnvConfig {
 
 function extractJsonObjectText(raw: string): string {
   let cleaned = raw.trim();
-  const fenceMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const fenceMatch = cleaned.match(/^```(?:json)?\s*([\s\S]*)\s*```$/i);
   if (fenceMatch?.[1]) {
     cleaned = fenceMatch[1].trim();
   }
@@ -31,6 +31,15 @@ function extractJsonObjectText(raw: string): string {
     return cleaned.slice(firstBrace, lastBrace + 1);
   }
   return cleaned;
+}
+
+function parseModelList(raw: string | undefined, fallback: string[]): string[] {
+  const items = (raw ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const source = items.length > 0 ? items : fallback;
+  return Array.from(new Set(source));
 }
 
 /**
@@ -85,43 +94,53 @@ export class VercelAISDKProvider implements LLMProvider {
     }
 
     if (env.deepseekApiKey) {
-      const modelId = env.deepseekModel || 'deepseek-v4-pro';
+      const modelIds = parseModelList(env.deepseekModel, [
+        'deepseek-flash',
+        'deepseek-v4-pro',
+      ]);
       const provider = createOpenAI({
         apiKey: env.deepseekApiKey,
         baseURL: env.deepseekBaseUrl || 'https://api.deepseek.com/v1',
         compatibility: 'compatible',
       });
-      this.models.push({
-        id: `deepseek:${modelId}`,
-        label: `DeepSeek (${modelId})`,
-        provider: 'deepseek',
-        available: true,
-      });
-      this.registry.set(`deepseek:${modelId}`, {
-        provider: 'deepseek',
-        create: () => provider(modelId),
-      });
-      if (!this.defaultModelId) this.defaultModelId = `deepseek:${modelId}`;
+      for (const modelId of modelIds) {
+        this.models.push({
+          id: `deepseek:${modelId}`,
+          label: `DeepSeek (${modelId})`,
+          provider: 'deepseek',
+          available: true,
+        });
+        this.registry.set(`deepseek:${modelId}`, {
+          provider: 'deepseek',
+          create: () => provider(modelId),
+        });
+        if (!this.defaultModelId) this.defaultModelId = `deepseek:${modelId}`;
+      }
     }
 
     if (env.kimiApiKey) {
-      const modelId = env.kimiModel || 'kimi-k2.7-code';
+      const modelIds = parseModelList(env.kimiModel, [
+        'kimi-k2.7-code-highspeed',
+        'kimi-k2.7-code',
+      ]);
       const provider = createOpenAI({
         apiKey: env.kimiApiKey,
         baseURL: env.kimiBaseUrl || 'https://api.moonshot.cn/v1',
         compatibility: 'compatible',
       });
-      this.models.push({
-        id: `kimi:${modelId}`,
-        label: `Kimi (${modelId})`,
-        provider: 'kimi',
-        available: true,
-      });
-      this.registry.set(`kimi:${modelId}`, {
-        provider: 'kimi',
-        create: () => provider(modelId),
-      });
-      if (!this.defaultModelId) this.defaultModelId = `kimi:${modelId}`;
+      for (const modelId of modelIds) {
+        this.models.push({
+          id: `kimi:${modelId}`,
+          label: `Kimi (${modelId})`,
+          provider: 'kimi',
+          available: true,
+        });
+        this.registry.set(`kimi:${modelId}`, {
+          provider: 'kimi',
+          create: () => provider(modelId),
+        });
+        if (!this.defaultModelId) this.defaultModelId = `kimi:${modelId}`;
+      }
     }
 
     if (env.defaultModel && this.registry.has(env.defaultModel)) {
@@ -174,6 +193,7 @@ export class VercelAISDKProvider implements LLMProvider {
               prompt: input.prompt,
               schema: zodSchema,
               maxTokens: 8192,
+              abortSignal: AbortSignal.timeout(120_000),
             })
           : await generateObject({
               model,
@@ -183,9 +203,15 @@ export class VercelAISDKProvider implements LLMProvider {
               mode: 'json',
               temperature,
               maxTokens: 8192,
+              abortSignal: AbortSignal.timeout(120_000),
             });
       return res.object;
     } catch (primaryErr) {
+      const primaryMsg =
+        primaryErr instanceof Error ? primaryErr.message : String(primaryErr);
+      console.warn(
+        `[VercelAISDKProvider] generateObject primary failed for "${provider}" (${input.model || this.defaultModelId}): ${primaryMsg}; trying generateText JSON fallback`
+      );
       // Resilient single-shot fallback for domestic OpenAI-compatible gateways
       // that occasionally emit markdown fences around JSON payloads.
       const fallback = await generateText({
@@ -194,15 +220,19 @@ export class VercelAISDKProvider implements LLMProvider {
         prompt: input.prompt,
         temperature,
         maxTokens: 8192,
+        abortSignal: AbortSignal.timeout(120_000),
       });
 
       const jsonText = extractJsonObjectText(fallback.text);
       try {
         const parsed = JSON.parse(jsonText);
         return zodSchema.parse(parsed);
-      } catch {
-        const primaryMsg =
-          primaryErr instanceof Error ? primaryErr.message : String(primaryErr);
+      } catch (fallbackErr) {
+        const fallbackMsg =
+          fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
+        console.warn(
+          `[VercelAISDKProvider] generateText fallback failed for "${provider}": ${fallbackMsg} (textLen=${fallback.text.length})`
+        );
         throw new Error(
           `Structured JSON generation failed for provider "${provider}": ${primaryMsg}`
         );
