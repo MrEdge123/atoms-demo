@@ -32,7 +32,7 @@
 ### 环境变量配置（`.env.local`）
 参考 [.env.example](./.env.example)：
 - 离线默认模式无需配置任何外部密钥即可完整跑通（`LLM_ADAPTER=mock`、`STORAGE_ADAPTER=pglite`、`BILLING_ADAPTER=mock`）。
-- 接入真实大模型时设 `LLM_ADAPTER=vercel-ai` 并填入对应厂商密钥（支持 `DEEPSEEK_API_KEY`、`KIMI_API_KEY`、`OPENAI_API_KEY`、`ANTHROPIC_API_KEY`）。在已验收的 DeepSeek + Kimi 生产配置下（仅配置 `DEEPSEEK_API_KEY` 与 `KIMI_API_KEY`），工作台提供 7 个可选模型（`deepseek:deepseek-flash` 为默认首选项，另含 `deepseek:deepseek-v4-pro`、3 个 Kimi 模型及 2 个 Mock 模型）；如仅配 `DEEPSEEK_API_KEY` 则为 4 个选项，若同时配置 OpenAI / Anthropic 密钥，首选项会按 `/api/models` 返回顺序排在前面。
+- 接入真实大模型时设 `LLM_ADAPTER=vercel-ai` 并填入对应厂商密钥（支持 `DEEPSEEK_API_KEY`、`KIMI_API_KEY`、`OPENAI_API_KEY`、`ANTHROPIC_API_KEY`）。沿用模板默认的 `DEEPSEEK_MODEL` / `KIMI_MODEL` 列表时：同时配置 `DEEPSEEK_API_KEY` 与 `KIMI_API_KEY`（即线上已验收配置）提供 7 个可选模型（`deepseek:deepseek-flash` 为首选项，另含 `deepseek:deepseek-v4-pro`、3 个 Kimi 模型及 2 个 Mock 模型）；仅配置 `DEEPSEEK_API_KEY` 时提供 4 个选项（实际选项数随自定义 `*_MODEL` 列表增减）；若同时配置 OpenAI / Anthropic 密钥，首选项将按 `/api/models` 返回顺序排在前面。
 - 部署云端 Postgres 时设 `STORAGE_ADAPTER=postgres`、`DATABASE_URL` 与强随机 `APP_AUTH_SECRET`。
 
 ### 线上部署架构（第二阶段已完成）
