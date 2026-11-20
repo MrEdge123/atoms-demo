@@ -183,6 +183,7 @@ export class VercelAISDKProvider implements LLMProvider {
     const zodSchema = input.schema as unknown as ZodType<T>;
 
     const temperature = provider === 'kimi' ? 1 : 0.2;
+    const maxTokens = provider === 'kimi' ? 32768 : 8192;
 
     try {
       const res =
@@ -192,7 +193,7 @@ export class VercelAISDKProvider implements LLMProvider {
               system: input.system,
               prompt: input.prompt,
               schema: zodSchema,
-              maxTokens: 8192,
+              maxTokens,
               abortSignal: AbortSignal.timeout(120_000),
             })
           : await generateObject({
@@ -202,7 +203,7 @@ export class VercelAISDKProvider implements LLMProvider {
               schema: zodSchema,
               mode: 'json',
               temperature,
-              maxTokens: 8192,
+              maxTokens,
               abortSignal: AbortSignal.timeout(120_000),
             });
       return res.object;
@@ -219,7 +220,7 @@ export class VercelAISDKProvider implements LLMProvider {
         system: `${input.system}\n\nIMPORTANT: Return ONLY a valid raw JSON object that conforms strictly to the requested structure. Do not include markdown fences or any prose outside JSON.`,
         prompt: input.prompt,
         temperature,
-        maxTokens: 8192,
+        maxTokens,
         abortSignal: AbortSignal.timeout(120_000),
       });
 
@@ -231,7 +232,7 @@ export class VercelAISDKProvider implements LLMProvider {
         const fallbackMsg =
           fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
         console.warn(
-          `[VercelAISDKProvider] generateText fallback failed for "${provider}": ${fallbackMsg} (textLen=${fallback.text.length})`
+          `[VercelAISDKProvider] generateText fallback failed for "${provider}": ${fallbackMsg} (finishReason=${fallback.finishReason}, textLen=${fallback.text.length})`
         );
         throw new Error(
           `Structured JSON generation failed for provider "${provider}": ${primaryMsg}`

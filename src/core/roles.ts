@@ -73,7 +73,8 @@ STRICT RULES:
 5. Persist real user data with @atoms/cloud instead of fake in-memory arrays:
 
 ${sdkDocs}
-6. Return strictly valid JSON matching { "summary": string, "files": Array<{ "path": string, "content": string }> } (with optional "deletes").`,
+6. Keep the implementation clean and focused across 1-2 files ("src/App.tsx" and optionally "src/components/AuthBar.tsx") without redundant boilerplate so compilation is fast and reliable.
+7. Return strictly valid JSON matching { "summary": string, "files": Array<{ "path": string, "content": string }> } (with optional "deletes").`,
     prompt: `Build the application described by this confirmed ProductPlan:
 ${JSON.stringify(input.plan, null, 2)}
 

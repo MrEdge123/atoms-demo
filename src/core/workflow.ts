@@ -112,62 +112,73 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
 
     // Phase 1: Iris market research
     await this.repo.saveDraft(projectId, project.draftFiles, 'researching');
-    yield await this.emitAndPersist(projectId, getSeq, {
-      role: 'iris',
-      type: 'role_start',
-      payload: { label: 'Iris 正在开展市场与竞品调研...', idea },
-    });
+    const fallbackStatus: Project['status'] =
+      project.publishedVersion > 0 || Object.keys(project.draftFiles).length > 0
+        ? 'ready'
+        : 'error';
+    try {
+      yield await this.emitAndPersist(projectId, getSeq, {
+        role: 'iris',
+        type: 'role_start',
+        payload: { label: 'Iris 正在开展市场与竞品调研...', idea },
+      });
 
-    const irisPrompt = buildIrisPrompt(idea);
-    const research = await this.llm.generateObject({
-      ...irisPrompt,
-      schema: researchOutputSchema,
-      model: opts?.model,
-    });
+      const irisPrompt = buildIrisPrompt(idea);
+      const research = await this.llm.generateObject({
+        ...irisPrompt,
+        schema: researchOutputSchema,
+        model: opts?.model,
+      });
 
-    yield await this.emitAndPersist(projectId, getSeq, {
-      role: 'iris',
-      type: 'research_ready',
-      payload: research,
-    });
+      yield await this.emitAndPersist(projectId, getSeq, {
+        role: 'iris',
+        type: 'research_ready',
+        payload: research,
+      });
 
-    // Phase 2: Emma product planning (pauses for user confirmation)
-    await this.repo.saveDraft(projectId, project.draftFiles, 'planning');
-    yield await this.emitAndPersist(projectId, getSeq, {
-      role: 'emma',
-      type: 'role_start',
-      payload: { label: 'Emma 正在拆解产品方案与数据集合...' },
-    });
+      // Phase 2: Emma product planning (pauses for user confirmation)
+      await this.repo.saveDraft(projectId, project.draftFiles, 'planning');
+      yield await this.emitAndPersist(projectId, getSeq, {
+        role: 'emma',
+        type: 'role_start',
+        payload: { label: 'Emma 正在拆解产品方案与数据集合...' },
+      });
 
-    const emmaPrompt = buildEmmaPrompt(idea, JSON.stringify(research, null, 2));
-    const plan = await this.llm.generateObject({
-      ...emmaPrompt,
-      schema: productPlanSchema,
-      model: opts?.model,
-    });
+      const emmaPrompt = buildEmmaPrompt(idea, JSON.stringify(research, null, 2));
+      const plan = await this.llm.generateObject({
+        ...emmaPrompt,
+        schema: productPlanSchema,
+        model: opts?.model,
+      });
 
-    const normalizedPlan: ProductPlan = {
-      ...plan,
-      seo: plan.seo ?? {
-        title: plan.appName,
-        description: plan.summary,
-      },
-    };
+      const normalizedPlan: ProductPlan = {
+        ...plan,
+        seo: plan.seo ?? {
+          title: plan.appName,
+          description: plan.summary,
+        },
+      };
 
-    await this.repo.updatePlan(projectId, normalizedPlan);
-    await this.repo.saveDraft(projectId, project.draftFiles, 'awaiting_confirmation');
+      await this.repo.updatePlan(projectId, normalizedPlan);
+      await this.repo.saveDraft(projectId, project.draftFiles, 'awaiting_confirmation');
 
-    yield await this.emitAndPersist(projectId, getSeq, {
-      role: 'emma',
-      type: 'plan_ready',
-      payload: normalizedPlan,
-    });
+      yield await this.emitAndPersist(projectId, getSeq, {
+        role: 'emma',
+        type: 'plan_ready',
+        payload: normalizedPlan,
+      });
 
-    yield await this.emitAndPersist(projectId, getSeq, {
-      role: 'system',
-      type: 'done',
-      payload: { status: 'awaiting_confirmation' },
-    });
+      yield await this.emitAndPersist(projectId, getSeq, {
+        role: 'system',
+        type: 'done',
+        payload: { status: 'awaiting_confirmation' },
+      });
+    } catch (err) {
+      await this.repo
+        .saveDraft(projectId, project.draftFiles, fallbackStatus)
+        .catch(() => undefined);
+      throw err;
+    }
   }
 
   async *confirmPlan(
@@ -209,126 +220,133 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
     const getSeq = await this.nextSeq(projectId);
     const mode = input?.mode ?? 'linear';
 
-    if (mode === 'race') {
+    try {
+      if (mode === 'race') {
+        yield await this.emitAndPersist(projectId, getSeq, {
+          role: 'alex',
+          type: 'role_start',
+          payload: {
+            label: 'Race Mode 已启动：Alex 正在并行构建 2 套设计风格方案...',
+            mode: 'race',
+          },
+        });
+
+        const branchRuns = await Promise.all(
+          RACE_STYLE_DIRECTIONS.map(async (dir) => {
+            const buffered: Array<{
+              role: AgentRole;
+              type: AgentEvent['type'];
+              payload: unknown;
+              branchId?: string;
+            }> = [];
+
+            const prompt = buildAlexGeneratePrompt({
+              plan: mergedPlan,
+              styleDirection: `${dir.label}: ${dir.styleDirection}`,
+            });
+
+            const { files, artifact } = await this.buildWithAutoFix({
+              projectId,
+              plan: mergedPlan,
+              baseFiles: {},
+              initialPrompt: prompt,
+              model: input?.model,
+              branchId: dir.branchId,
+              onEvent: (ev) => {
+                buffered.push(ev);
+              },
+            });
+
+            const branch: RaceBranch = {
+              branchId: dir.branchId,
+              label: dir.label,
+              styleDirection: dir.styleDirection,
+              files,
+              previewHtml: artifact.ok ? artifact.html : null,
+              errors: artifact.ok ? [] : artifact.errors,
+            };
+
+            return { branch, buffered };
+          })
+        );
+
+        for (const run of branchRuns) {
+          for (const ev of run.buffered) {
+            yield await this.emitAndPersist(projectId, getSeq, ev);
+          }
+        }
+
+        const branches = branchRuns.map((r) => r.branch);
+        await this.repo.saveRaceBranches(projectId, branches);
+
+        const hasUsableBranch = branches.some(
+          (b) => b.previewHtml !== null && b.errors.length === 0
+        );
+        const finalStatus = hasUsableBranch ? 'awaiting_branch_selection' : 'error';
+        // Keep existing draftFiles (and any prior published version) strictly untouched
+        // until the user explicitly chooses a candidate branch via selectBranch().
+        await this.repo.saveDraft(projectId, project.draftFiles, finalStatus);
+
+        yield await this.emitAndPersist(projectId, getSeq, {
+          role: 'system',
+          type: 'done',
+          payload: {
+            status: finalStatus,
+            mode: 'race',
+            branches: branches.map((b) => ({
+              branchId: b.branchId,
+              label: b.label,
+              ok: b.previewHtml !== null && b.errors.length === 0,
+            })),
+          },
+        });
+        return;
+      }
+
+      // Standard linear SOP flow
       yield await this.emitAndPersist(projectId, getSeq, {
         role: 'alex',
         type: 'role_start',
-        payload: {
-          label: 'Race Mode 已启动：Alex 正在并行构建 2 套设计风格方案...',
-          mode: 'race',
+        payload: { label: 'Alex 正在编写全栈界面并接入 @atoms/cloud...', mode: 'linear' },
+      });
+
+      const buffered: Array<{
+        role: AgentRole;
+        type: AgentEvent['type'];
+        payload: unknown;
+        branchId?: string;
+      }> = [];
+
+      const { files, artifact } = await this.buildWithAutoFix({
+        projectId,
+        plan: mergedPlan,
+        baseFiles: {},
+        initialPrompt: buildAlexGeneratePrompt({ plan: mergedPlan }),
+        model: input?.model,
+        onEvent: (ev) => {
+          buffered.push(ev);
         },
       });
 
-      const branchRuns = await Promise.all(
-        RACE_STYLE_DIRECTIONS.map(async (dir) => {
-          const buffered: Array<{
-            role: AgentRole;
-            type: AgentEvent['type'];
-            payload: unknown;
-            branchId?: string;
-          }> = [];
-
-          const prompt = buildAlexGeneratePrompt({
-            plan: mergedPlan,
-            styleDirection: `${dir.label}: ${dir.styleDirection}`,
-          });
-
-          const { files, artifact } = await this.buildWithAutoFix({
-            projectId,
-            plan: mergedPlan,
-            baseFiles: {},
-            initialPrompt: prompt,
-            model: input?.model,
-            branchId: dir.branchId,
-            onEvent: (ev) => {
-              buffered.push(ev);
-            },
-          });
-
-          const branch: RaceBranch = {
-            branchId: dir.branchId,
-            label: dir.label,
-            styleDirection: dir.styleDirection,
-            files,
-            previewHtml: artifact.ok ? artifact.html : null,
-            errors: artifact.ok ? [] : artifact.errors,
-          };
-
-          return { branch, buffered };
-        })
-      );
-
-      for (const run of branchRuns) {
-        for (const ev of run.buffered) {
-          yield await this.emitAndPersist(projectId, getSeq, ev);
-        }
+      for (const ev of buffered) {
+        yield await this.emitAndPersist(projectId, getSeq, ev);
       }
 
-      const branches = branchRuns.map((r) => r.branch);
-      await this.repo.saveRaceBranches(projectId, branches);
-
-      const hasUsableBranch = branches.some(
-        (b) => b.previewHtml !== null && b.errors.length === 0
-      );
-      const finalStatus = hasUsableBranch ? 'awaiting_branch_selection' : 'error';
-      // Keep existing draftFiles (and any prior published version) strictly untouched
-      // until the user explicitly chooses a candidate branch via selectBranch().
-      await this.repo.saveDraft(projectId, project.draftFiles, finalStatus);
+      await this.repo.saveRaceBranches(projectId, []);
+      const finalStatus = artifact.ok ? 'ready' : 'error';
+      await this.repo.saveDraft(projectId, files, finalStatus);
 
       yield await this.emitAndPersist(projectId, getSeq, {
         role: 'system',
         type: 'done',
-        payload: {
-          status: finalStatus,
-          mode: 'race',
-          branches: branches.map((b) => ({
-            branchId: b.branchId,
-            label: b.label,
-            ok: b.previewHtml !== null && b.errors.length === 0,
-          })),
-        },
+        payload: { status: finalStatus, mode: 'linear' },
       });
-      return;
+    } catch (err) {
+      await this.repo
+        .saveDraft(projectId, project.draftFiles, 'error')
+        .catch(() => undefined);
+      throw err;
     }
-
-    // Standard linear SOP flow
-    yield await this.emitAndPersist(projectId, getSeq, {
-      role: 'alex',
-      type: 'role_start',
-      payload: { label: 'Alex 正在编写全栈界面并接入 @atoms/cloud...', mode: 'linear' },
-    });
-
-    const buffered: Array<{
-      role: AgentRole;
-      type: AgentEvent['type'];
-      payload: unknown;
-      branchId?: string;
-    }> = [];
-
-    const { files, artifact } = await this.buildWithAutoFix({
-      projectId,
-      plan: mergedPlan,
-      baseFiles: {},
-      initialPrompt: buildAlexGeneratePrompt({ plan: mergedPlan }),
-      model: input?.model,
-      onEvent: (ev) => {
-        buffered.push(ev);
-      },
-    });
-
-    for (const ev of buffered) {
-      yield await this.emitAndPersist(projectId, getSeq, ev);
-    }
-
-    await this.repo.saveRaceBranches(projectId, []);
-    const finalStatus = artifact.ok ? 'ready' : 'error';
-    await this.repo.saveDraft(projectId, files, finalStatus);
-
-    yield await this.emitAndPersist(projectId, getSeq, {
-      role: 'system',
-      type: 'done',
-      payload: { status: finalStatus, mode: 'linear' },
-    });
   }
 
   async selectBranch(projectId: string, branchId: string): Promise<Project> {
@@ -389,47 +407,54 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
     const getSeq = await this.nextSeq(projectId);
     await this.repo.saveDraft(projectId, project.draftFiles, 'building');
 
-    yield await this.emitAndPersist(projectId, getSeq, {
-      role: 'alex',
-      type: 'role_start',
-      payload: { label: 'Alex 正在按指令迭代改版...', instruction },
-    });
+    try {
+      yield await this.emitAndPersist(projectId, getSeq, {
+        role: 'alex',
+        type: 'role_start',
+        payload: { label: 'Alex 正在按指令迭代改版...', instruction },
+      });
 
-    const buffered: Array<{
-      role: AgentRole;
-      type: AgentEvent['type'];
-      payload: unknown;
-      branchId?: string;
-    }> = [];
+      const buffered: Array<{
+        role: AgentRole;
+        type: AgentEvent['type'];
+        payload: unknown;
+        branchId?: string;
+      }> = [];
 
-    const { files, artifact } = await this.buildWithAutoFix({
-      projectId,
-      plan: project.plan,
-      baseFiles: project.draftFiles,
-      initialPrompt: buildAlexIteratePrompt({
+      const { files, artifact } = await this.buildWithAutoFix({
+        projectId,
         plan: project.plan,
-        files: project.draftFiles,
-        instruction,
-      }),
-      model: opts?.model,
-      onEvent: (ev) => {
-        buffered.push(ev);
-      },
-    });
+        baseFiles: project.draftFiles,
+        initialPrompt: buildAlexIteratePrompt({
+          plan: project.plan,
+          files: project.draftFiles,
+          instruction,
+        }),
+        model: opts?.model,
+        onEvent: (ev) => {
+          buffered.push(ev);
+        },
+      });
 
-    for (const ev of buffered) {
-      yield await this.emitAndPersist(projectId, getSeq, ev);
+      for (const ev of buffered) {
+        yield await this.emitAndPersist(projectId, getSeq, ev);
+      }
+
+      // Preserve publishedHtml untouched; only update draftFiles and status.
+      const nextStatus = artifact.ok ? 'ready' : 'error';
+      await this.repo.saveDraft(projectId, files, nextStatus);
+
+      yield await this.emitAndPersist(projectId, getSeq, {
+        role: 'system',
+        type: 'done',
+        payload: { status: nextStatus },
+      });
+    } catch (err) {
+      await this.repo
+        .saveDraft(projectId, project.draftFiles, 'ready')
+        .catch(() => undefined);
+      throw err;
     }
-
-    // Preserve publishedHtml untouched; only update draftFiles and status.
-    const nextStatus = artifact.ok ? 'ready' : 'error';
-    await this.repo.saveDraft(projectId, files, nextStatus);
-
-    yield await this.emitAndPersist(projectId, getSeq, {
-      role: 'system',
-      type: 'done',
-      payload: { status: nextStatus },
-    });
   }
 
   async publish(projectId: string): Promise<PublishResult> {
