@@ -191,6 +191,13 @@ export function Workbench() {
 
   const projectMenuRef = useRef<HTMLDivElement>(null);
   const chatScrollRef = useRef<HTMLDivElement>(null);
+  const activeIdRef = useRef<string | null>(null);
+  const snapshotSeqRef = useRef(0);
+  const modelsLoadedRef = useRef(false);
+
+  useEffect(() => {
+    activeIdRef.current = activeId;
+  }, [activeId]);
 
   useEffect(() => {
     function handleOutside(e: MouseEvent) {
@@ -208,9 +215,16 @@ export function Workbench() {
   }, []);
 
   const loadSnapshot = useCallback(async (projectId: string) => {
-    const res = await fetch(`/api/projects/${projectId}`);
+    const reqSeq = ++snapshotSeqRef.current;
+    const res = await fetch(`/api/projects/${projectId}`, { cache: 'no-store' });
     if (!res.ok) return null;
     const data = (await res.json()) as ProjectSnapshotResponse;
+    if (
+      reqSeq !== snapshotSeqRef.current ||
+      (activeIdRef.current && activeIdRef.current !== projectId)
+    ) {
+      return null;
+    }
     setSnapshot(data);
     setEvents(data.events);
     setEditablePlan(data.project.plan);
@@ -227,11 +241,13 @@ export function Workbench() {
   }, []);
 
   const refreshProjectsList = useCallback(async (preferredId?: string | null) => {
-    const [projRes, modelRes] = await Promise.all([
-      fetch('/api/projects'),
-      fetch('/api/models'),
-    ]);
-    if (modelRes.ok) {
+    const projPromise = fetch('/api/projects', { cache: 'no-store' });
+    const modelPromise = modelsLoadedRef.current
+      ? null
+      : fetch('/api/models', { cache: 'no-store' });
+    const [projRes, modelRes] = await Promise.all([projPromise, modelPromise]);
+    if (modelRes && modelRes.ok) {
+      modelsLoadedRef.current = true;
       const mData = (await modelRes.json()) as { models: ModelInfo[] };
       setModels(mData.models);
       setSelectedModel((prev) => prev || mData.models[0]?.id || 'mock-default');
@@ -307,14 +323,25 @@ export function Workbench() {
     setCodeSaveBanner(null);
     setCodeCompileErrors([]);
     setComposerText('');
+    activeIdRef.current = projectId;
     setActiveId(projectId);
+    setSnapshot(null);
+    setEvents([]);
+    setEditablePlan(null);
+    setSelectedFile('');
     setViewMode('workspace');
     setWorkspaceSidebarOpen(false);
     setRightTab('preview');
-    const data = await loadSnapshot(projectId);
-    if (data) {
-      const draftCount = Object.keys(data.project.draftFiles).length;
-      setComposerMode(draftCount > 0 ? 'iterate' : 'restart');
+    try {
+      const data = await loadSnapshot(projectId);
+      if (data) {
+        const draftCount = Object.keys(data.project.draftFiles).length;
+        setComposerMode(draftCount > 0 ? 'iterate' : 'restart');
+      } else {
+        setErrorMsg('无法加载项目详情，请刷新后重试');
+      }
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : String(err));
     }
   }
 
@@ -326,8 +353,13 @@ export function Workbench() {
         title: title || `新项目 ${projects.length + 1}`,
       }),
     });
+    if (!res.ok) {
+      const errData = (await res.json().catch(() => ({}))) as { error?: string };
+      throw new Error(errData.error || `创建项目失败 (HTTP ${res.status})`);
+    }
     const data = (await res.json()) as { project: Project };
     setProjects((prev) => [data.project, ...prev]);
+    activeIdRef.current = data.project.id;
     setActiveId(data.project.id);
     return data.project;
   }
@@ -343,12 +375,20 @@ export function Workbench() {
     setCodeSaveBanner(null);
     setCodeCompileErrors([]);
     setComposerText('');
-    const created = await createNewProject();
-    setViewMode('workspace');
-    setWorkspaceSidebarOpen(false);
-    setRightTab('preview');
-    setComposerMode('restart');
-    await loadSnapshot(created.id);
+    try {
+      const created = await createNewProject();
+      setSnapshot(null);
+      setEvents([]);
+      setEditablePlan(null);
+      setSelectedFile('');
+      setViewMode('workspace');
+      setWorkspaceSidebarOpen(false);
+      setRightTab('preview');
+      setComposerMode('restart');
+      await loadSnapshot(created.id);
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : String(err));
+    }
   }
 
   async function startSopForProject(projectId: string, ideaText: string) {
@@ -370,8 +410,8 @@ export function Workbench() {
       await readSseStream(res, (ev) => {
         setEvents((prev) => [...prev, ev]);
       });
-      await refreshProjectsList(projectId);
       const latest = await loadSnapshot(projectId);
+      void refreshProjectsList(projectId).catch(() => null);
       if (latest && Object.keys(latest.project.draftFiles).length > 0) {
         setComposerMode('iterate');
       }
@@ -389,23 +429,27 @@ export function Workbench() {
     setErrorMsg('');
     setRuntimeError('');
     setShareOpen(false);
-    const created = await createNewProject('AI 构建新项目');
-    setSnapshot({
-      project: created,
-      events: [],
-      previewHtml: null,
-      compileErrors: [],
-      qrDataUrl: null,
-      publicUrl: null,
-    });
-    setEvents([]);
-    setEditablePlan(null);
-    setSelectedFile('');
-    setComposerMode('restart');
-    setViewMode('workspace');
-    setWorkspaceSidebarOpen(false);
-    setRightTab('preview');
-    await startSopForProject(created.id, trimmed);
+    try {
+      const created = await createNewProject('AI 构建新项目');
+      setSnapshot({
+        project: created,
+        events: [],
+        previewHtml: null,
+        compileErrors: [],
+        qrDataUrl: null,
+        publicUrl: null,
+      });
+      setEvents([]);
+      setEditablePlan(null);
+      setSelectedFile('');
+      setComposerMode('restart');
+      setViewMode('workspace');
+      setWorkspaceSidebarOpen(false);
+      setRightTab('preview');
+      await startSopForProject(created.id, trimmed);
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : String(err));
+    }
   }
 
   async function handleConfirmAndBuild() {
@@ -433,8 +477,8 @@ export function Workbench() {
       await readSseStream(res, (ev) => {
         setEvents((prev) => [...prev, ev]);
       });
-      await refreshProjectsList(activeId);
       const latest = await loadSnapshot(activeId);
+      void refreshProjectsList(activeId).catch(() => null);
       if (latest && Object.keys(latest.project.draftFiles).length > 0) {
         setComposerMode('iterate');
       }
@@ -463,8 +507,11 @@ export function Workbench() {
         const j = (await res.json()) as { error?: string };
         throw new Error(j.error || '切换失败');
       }
-      await refreshProjectsList(activeId);
-      await loadSnapshot(activeId);
+      const latest = await loadSnapshot(activeId);
+      if (!latest) {
+        throw new Error('所选方案已应用，但刷新预览失败，请点击刷新预览按钮');
+      }
+      void refreshProjectsList(activeId).catch(() => null);
       setComposerMode('iterate');
       setRightTab('preview');
     } catch (err) {
@@ -494,8 +541,8 @@ export function Workbench() {
         setEvents((prev) => [...prev, ev]);
       });
       if (!customInstruction) setComposerText('');
-      await refreshProjectsList(activeId);
       await loadSnapshot(activeId);
+      void refreshProjectsList(activeId).catch(() => null);
       setRightTab('preview');
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : String(err));
@@ -521,8 +568,8 @@ export function Workbench() {
       if (!res.ok || !data.url || !data.qrDataUrl) {
         throw new Error(data.error || '发布失败');
       }
-      await refreshProjectsList(activeId);
       await loadSnapshot(activeId);
+      void refreshProjectsList(activeId).catch(() => null);
       setShareOpen(true);
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : String(err));

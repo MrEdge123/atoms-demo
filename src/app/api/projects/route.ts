@@ -6,7 +6,17 @@ export const dynamic = 'force-dynamic';
 export async function GET() {
   const c = await getContainer();
   const projects = await c.repo.listAll();
-  return NextResponse.json({ projects });
+  const summaries = projects.map((project) => ({
+    ...project,
+    draftFiles: {},
+    raceBranches: [],
+    publishedFiles: null,
+    publishedHtml: null,
+  }));
+  return NextResponse.json(
+    { projects: summaries },
+    { headers: { 'Cache-Control': 'no-store' } }
+  );
 }
 
 export async function POST(req: Request) {

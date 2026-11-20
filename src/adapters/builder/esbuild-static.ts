@@ -327,13 +327,11 @@ export class EsbuildStaticBuilder implements AppBuilder {
         target: ['es2020'],
         charset: 'utf8',
         jsx: 'automatic',
-        minify: input.mode === 'production',
+        minify: true,
         plugins: [plugin],
         logLevel: 'silent',
         define: {
-          'process.env.NODE_ENV': JSON.stringify(
-            input.mode === 'production' ? 'production' : 'development'
-          ),
+          'process.env.NODE_ENV': '"production"',
         },
       });
 

@@ -25,15 +25,22 @@ export async function GET(
     compilePreviewSnapshot(c, project, origin),
   ]);
 
-  return NextResponse.json({
-    project,
-    events,
-    previewHtml: snapshot.previewHtml,
-    compileErrors: snapshot.compileErrors,
-    qrDataUrl: snapshot.qrDataUrl,
-    publicUrl:
-      project.publishedVersion > 0 ? `${origin}/s/${project.slug}` : null,
-  });
+  return NextResponse.json(
+    {
+      project: {
+        ...project,
+        publishedFiles: null,
+        publishedHtml: null,
+      },
+      events,
+      previewHtml: snapshot.previewHtml,
+      compileErrors: snapshot.compileErrors,
+      qrDataUrl: snapshot.qrDataUrl,
+      publicUrl:
+        project.publishedVersion > 0 ? `${origin}/s/${project.slug}` : null,
+    },
+    { headers: { 'Cache-Control': 'no-store' } }
+  );
 }
 
 export async function PATCH(

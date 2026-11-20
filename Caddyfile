@@ -1,4 +1,8 @@
 {$SITE_DOMAIN:xcodea.online} {
+    @compressible {
+        not path /api/projects/*/start /api/projects/*/confirm /api/projects/*/iterate /api/cloud/*/ai
+    }
+    encode @compressible zstd gzip
     reverse_proxy app:3000 {
         flush_interval -1
     }
