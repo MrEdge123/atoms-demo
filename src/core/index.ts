@@ -8,10 +8,13 @@ export {
 } from './guards';
 export {
   alexFilesOutputSchema,
+  designScenarioIdSchema,
+  designSystemSchema,
   mergeVirtualFS,
   normalizePath,
   productPlanSchema,
   researchOutputSchema,
+  styleThemeSchema,
   type AlexFilesOutput,
   type ResearchOutput,
 } from './schemas';
@@ -24,3 +27,18 @@ export {
   buildEmmaPrompt,
   buildIrisPrompt,
 } from './roles';
+export {
+  DESIGN_SCENARIOS,
+  getAlexDesignGuidePrompt,
+  getAlexIterateDesignGuardrail,
+  getEmmaDesignGuidePrompt,
+  getRaceDirectionsForPlan,
+  getScenarioDefinition,
+  renderDesignMarkdown,
+  type DesignScenarioDefinition,
+  type RaceStyleDirection,
+} from './design-guide';
+export {
+  BUILTIN_STYLE_THEMES,
+  applyThemeToDesignSystem,
+} from './style-presets';

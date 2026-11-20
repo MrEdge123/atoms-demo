@@ -5,6 +5,7 @@ import type {
   ProductPlan,
   Project,
   RaceBranch,
+  StyleThemeSpec,
   VirtualFS,
 } from '../domain';
 import type {
@@ -21,8 +22,12 @@ import {
   buildAlexIteratePrompt,
   buildEmmaPrompt,
   buildIrisPrompt,
-  RACE_STYLE_DIRECTIONS,
 } from './roles';
+import {
+  getRaceDirectionsForPlan,
+  renderDesignMarkdown,
+} from './design-guide';
+import { applyThemeToDesignSystem } from './style-presets';
 import {
   alexFilesOutputSchema,
   mergeVirtualFS,
@@ -122,7 +127,7 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
   async *start(
     projectId: string,
     idea: string,
-    opts?: { model?: string }
+    opts?: { model?: string; styleTheme?: StyleThemeSpec }
   ): AsyncIterable<AgentEvent> {
     const runToken = this.acquireProjectLock(projectId);
     const started = Date.now();
@@ -188,12 +193,20 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
         payload: { label: 'Emma 正在拆解产品方案与数据集合...' },
       });
 
-      const emmaPrompt = buildEmmaPrompt(idea, JSON.stringify(research, null, 2));
+      const emmaPrompt = buildEmmaPrompt(
+        idea,
+        JSON.stringify(research, null, 2),
+        opts?.styleTheme
+      );
       const plan = await this.llm.generateObject({
         ...emmaPrompt,
         schema: productPlanSchema,
         model: opts?.model,
       });
+
+      const resolvedDesignSystem = opts?.styleTheme
+        ? applyThemeToDesignSystem(plan.designSystem, opts.styleTheme)
+        : plan.designSystem;
 
       const normalizedPlan: ProductPlan = {
         ...plan,
@@ -201,6 +214,7 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
           title: plan.appName,
           description: plan.summary,
         },
+        ...(resolvedDesignSystem ? { designSystem: resolvedDesignSystem } : {}),
       };
 
       await this.repo.updatePlan(projectId, normalizedPlan);
@@ -280,6 +294,12 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
             title: input?.planPatch?.appName ?? project.plan.appName,
             description: input?.planPatch?.summary ?? project.plan.summary,
           },
+        ...(input?.planPatch?.designSystem ?? project.plan.designSystem
+          ? {
+              designSystem:
+                input?.planPatch?.designSystem ?? project.plan.designSystem,
+            }
+          : {}),
       };
 
       rollbackFiles = project.draftFiles;
@@ -295,13 +315,14 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
           role: 'alex',
           type: 'role_start',
           payload: {
-            label: 'Race Mode 已启动：Alex 正在并行构建 2 套设计风格方案...',
+            label: 'Race Mode 已启动：Alex 正在并行构建 2 套贴合场景的风格方案...',
             mode: 'race',
           },
         });
 
+        const raceDirections = getRaceDirectionsForPlan(mergedPlan);
         const branchRuns = await Promise.all(
-          RACE_STYLE_DIRECTIONS.map(async (dir) => {
+          raceDirections.map(async (dir) => {
             const buffered: Array<{
               role: AgentRole;
               type: AgentEvent['type'];
@@ -309,8 +330,21 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
               branchId?: string;
             }> = [];
 
+            const designMd = renderDesignMarkdown(mergedPlan, {
+              branchLabel: dir.label,
+              branchStyleDirection: dir.styleDirection,
+            });
+            buffered.push({
+              role: 'alex',
+              branchId: dir.branchId,
+              type: 'file_write',
+              payload: { path: 'DESIGN.md', bytes: designMd.length },
+            });
+
             const prompt = buildAlexGeneratePrompt({
               plan: mergedPlan,
+              designMd,
+              branchId: dir.branchId,
               styleDirection: `${dir.label}: ${dir.styleDirection}`,
             });
 
@@ -318,7 +352,7 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
               const { files, artifact } = await this.buildWithAutoFix({
                 projectId,
                 plan: mergedPlan,
-                baseFiles: {},
+                baseFiles: { 'DESIGN.md': designMd },
                 initialPrompt: prompt,
                 model: input?.model,
                 branchId: dir.branchId,
@@ -331,7 +365,7 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
                 branchId: dir.branchId,
                 label: dir.label,
                 styleDirection: dir.styleDirection,
-                files,
+                files: files['DESIGN.md'] ? files : { 'DESIGN.md': designMd, ...files },
                 previewHtml: artifact.ok ? artifact.html : null,
                 errors: artifact.ok ? [] : artifact.errors,
               };
@@ -406,26 +440,36 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
       yield await this.emitAndPersist(projectId, getSeq, {
         role: 'alex',
         type: 'role_start',
-        payload: { label: 'Alex 正在编写全栈界面并接入 @atoms/cloud...', mode: 'linear' },
+        payload: { label: 'Alex 正在编写 DESIGN.md 与全栈界面...', mode: 'linear' },
       });
 
+      const designMd = renderDesignMarkdown(mergedPlan);
       const buffered: Array<{
         role: AgentRole;
         type: AgentEvent['type'];
         payload: unknown;
         branchId?: string;
-      }> = [];
+      }> = [
+        {
+          role: 'alex',
+          type: 'file_write',
+          payload: { path: 'DESIGN.md', bytes: designMd.length },
+        },
+      ];
 
       const { files, artifact } = await this.buildWithAutoFix({
         projectId,
         plan: mergedPlan,
-        baseFiles: {},
-        initialPrompt: buildAlexGeneratePrompt({ plan: mergedPlan }),
+        baseFiles: { 'DESIGN.md': designMd },
+        initialPrompt: buildAlexGeneratePrompt({ plan: mergedPlan, designMd }),
         model: input?.model,
         onEvent: (ev) => {
           buffered.push(ev);
         },
       });
+      const finalFiles = files['DESIGN.md']
+        ? files
+        : { 'DESIGN.md': designMd, ...files };
 
       for (const ev of buffered) {
         yield await this.emitAndPersist(projectId, getSeq, ev);
@@ -433,7 +477,7 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
 
       await this.repo.saveRaceBranches(projectId, []);
       const finalStatus = artifact.ok ? 'ready' : 'error';
-      await this.repo.saveDraft(projectId, files, finalStatus);
+      await this.repo.saveDraft(projectId, finalFiles, finalStatus);
       completed = true;
       console.log(
         `[Workflow] confirmPlan done project=${projectId} mode=linear status=${finalStatus} elapsed=${Date.now() - started}ms`
@@ -565,8 +609,12 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
       }
 
       // Preserve publishedHtml untouched; only update draftFiles and status.
+      const finalIterFiles =
+        rollbackFiles['DESIGN.md'] && !files['DESIGN.md']
+          ? { ...files, 'DESIGN.md': rollbackFiles['DESIGN.md'] }
+          : files;
       const nextStatus = artifact.ok ? 'ready' : 'error';
-      await this.repo.saveDraft(projectId, files, nextStatus);
+      await this.repo.saveDraft(projectId, finalIterFiles, nextStatus);
       completed = true;
       console.log(
         `[Workflow] iterate done project=${projectId} status=${nextStatus} elapsed=${Date.now() - started}ms`

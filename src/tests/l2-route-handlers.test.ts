@@ -106,6 +106,19 @@ describe('L2b: Next.js Route Handlers end-to-end with PGlite', () => {
     const listJson = (await listRes.json()) as { projects: Array<{ id: string }> };
     expect(listJson.projects.some((p) => p.id === project.id)).toBe(true);
 
+    const invalidThemeStartRes = await postStart(
+      new Request(`http://127.0.0.1:3105/api/projects/${project.id}/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          idea: '做一个活动报名签到网站',
+          styleTheme: { id: 'broken' },
+        }),
+      }),
+      { params: Promise.resolve({ id: project.id }) }
+    );
+    expect(invalidThemeStartRes.status).toBe(400);
+
     const startRes = await postStart(
       new Request(`http://127.0.0.1:3105/api/projects/${project.id}/start`, {
         method: 'POST',

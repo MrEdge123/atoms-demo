@@ -87,6 +87,7 @@ npm run start
   - [05 - Atoms 实测使用体验报告与视觉排版规范](./docs/05-atoms-ux-visual-audit.md)
   - [06 - 最终成品交付清单与两阶段实施规划](./docs/06-delivery-checklist.md)
   - [07 - 国内环境外部依赖调研与组件选型指南](./docs/07-china-external-dependencies-research.md)
+  - [08 - 高级网页 UI 设计参考手册（Agent 版）](./docs/08-ui-design-guide.md)
 - **核心架构目录（Ports & Adapters）**：
   - `src/domain/`：领域契约（零外部依赖 TypeScript）
   - `src/ports/`：五大核心端口抽象

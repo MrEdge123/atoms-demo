@@ -18,6 +18,7 @@ import {
   Home,
   LayoutGrid,
   Monitor,
+  Palette,
   PanelLeftClose,
   PanelLeftOpen,
   Pencil,
@@ -37,10 +38,18 @@ import type {
   AgentEvent,
   CloudCapability,
   CompileError,
+  DesignScenarioId,
   ProductPlan,
   Project,
+  StyleThemeSpec,
 } from '@/domain';
 import type { ModelInfo } from '@/ports';
+import {
+  BUILTIN_STYLE_THEMES,
+  DESIGN_SCENARIOS,
+  applyThemeToDesignSystem,
+  styleThemeSchema,
+} from '@/core';
 import {
   getMutationBlockReason,
   hasPendingRaceSelection as checkPendingRaceSelection,
@@ -58,7 +67,10 @@ import {
 import { GoodPathCard } from './atoms/GoodPathCard';
 import { LauncherView, type DemoIdeaPreset } from './atoms/LauncherView';
 import { SharePublishPopover } from './atoms/SharePublishPopover';
+import { StyleThemeModal } from './atoms/StyleThemeModal';
 import { TimelineStream } from './atoms/TimelineStream';
+
+const CUSTOM_THEMES_STORAGE_KEY = 'atoms_custom_style_themes_v1';
 
 interface ProjectSnapshotResponse {
   project: Project;
@@ -169,6 +181,12 @@ export function Workbench() {
   const [buildMode, setBuildMode] = useState<'linear' | 'race'>('linear');
   const [editablePlan, setEditablePlan] = useState<ProductPlan | null>(null);
 
+  const [customThemes, setCustomThemes] = useState<StyleThemeSpec[]>([]);
+  const [selectedThemeId, setSelectedThemeId] = useState<string>('auto');
+  const [themeModalMode, setThemeModalMode] = useState<'launcher' | 'emma' | null>(
+    null
+  );
+
   const [busyAction, setBusyAction] = useState<string>('');
   const [errorMsg, setErrorMsg] = useState<string>('');
   const [runtimeError, setRuntimeError] = useState<string>('');
@@ -211,6 +229,80 @@ export function Workbench() {
   useEffect(() => {
     activeIdRef.current = activeId;
   }, [activeId]);
+
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(CUSTOM_THEMES_STORAGE_KEY);
+      if (!raw) return;
+      const parsedJson = JSON.parse(raw);
+      if (!Array.isArray(parsedJson)) return;
+      const valid: StyleThemeSpec[] = [];
+      for (const item of parsedJson) {
+        const res = styleThemeSchema.safeParse(item);
+        if (res.success) {
+          valid.push({ ...res.data, isCustom: true });
+        }
+      }
+      setCustomThemes(valid);
+    } catch {
+      // Ignore invalid localStorage payload
+    }
+  }, []);
+
+  const allThemes = useMemo(
+    () => [...BUILTIN_STYLE_THEMES, ...customThemes],
+    [customThemes]
+  );
+
+  const activeTheme = useMemo(
+    () =>
+      selectedThemeId === 'auto'
+        ? null
+        : allThemes.find((t) => t.id === selectedThemeId) ?? null,
+    [allThemes, selectedThemeId]
+  );
+
+  function persistCustomThemes(next: StyleThemeSpec[]) {
+    setCustomThemes(next);
+    try {
+      window.localStorage.setItem(CUSTOM_THEMES_STORAGE_KEY, JSON.stringify(next));
+    } catch {
+      // Ignore storage quota errors
+    }
+  }
+
+  function handleSaveCustomTheme(theme: StyleThemeSpec) {
+    const next = [theme, ...customThemes.filter((t) => t.id !== theme.id)];
+    persistCustomThemes(next);
+  }
+
+  function handleDeleteCustomTheme(themeId: string) {
+    const next = customThemes.filter((t) => t.id !== themeId);
+    persistCustomThemes(next);
+    if (selectedThemeId === themeId) {
+      setSelectedThemeId('auto');
+    }
+  }
+
+  function handleImportCustomThemes(imported: StyleThemeSpec[]) {
+    const existingIds = new Set(customThemes.map((t) => t.id));
+    const deduped = [
+      ...imported.filter((t) => !existingIds.has(t.id)),
+      ...customThemes,
+    ];
+    persistCustomThemes(deduped);
+  }
+
+  function handleApplyThemeSelection(theme: StyleThemeSpec | null) {
+    if (themeModalMode === 'emma' && editablePlan) {
+      setEditablePlan({
+        ...editablePlan,
+        designSystem: applyThemeToDesignSystem(editablePlan.designSystem, theme),
+      });
+      return;
+    }
+    setSelectedThemeId(theme ? theme.id : 'auto');
+  }
 
   useEffect(() => {
     function handleOutside(e: MouseEvent) {
@@ -263,7 +355,11 @@ export function Workbench() {
       const fileKeys = Object.keys(data.project.draftFiles);
       if (fileKeys.length > 0) {
         setSelectedFile((prev) =>
-          prev && fileKeys.includes(prev) ? prev : fileKeys[0]
+          prev && fileKeys.includes(prev)
+            ? prev
+            : fileKeys.includes('src/App.tsx')
+              ? 'src/App.tsx'
+              : fileKeys[0]
         );
       } else {
         setSelectedFile('');
@@ -458,6 +554,7 @@ export function Workbench() {
         body: JSON.stringify({
           idea: trimmed,
           model: selectedModel || undefined,
+          styleTheme: activeTheme ?? undefined,
         }),
       });
       await readSseStream(res, (ev) => {
@@ -874,21 +971,37 @@ export function Workbench() {
 
   if (viewMode === 'launcher') {
     return (
-      <LauncherView
-        projects={projects}
-        models={models}
-        selectedModel={selectedModel}
-        onSelectModel={setSelectedModel}
-        idea={launcherIdea}
-        onIdeaChange={setLauncherIdea}
-        presets={DEMO_IDEAS}
-        busyAction={busyAction}
-        errorMsg={errorMsg}
-        onSubmitIdea={() => void handleLauncherSubmit()}
-        onOpenProject={(pid) => void openProjectInWorkspace(pid)}
-        onCreateBlankProject={() => void handleNewBlankProject()}
-        onDeleteProject={(pid) => void handleDeleteProject(pid)}
-      />
+      <>
+        <LauncherView
+          projects={projects}
+          models={models}
+          selectedModel={selectedModel}
+          onSelectModel={setSelectedModel}
+          idea={launcherIdea}
+          onIdeaChange={setLauncherIdea}
+          presets={DEMO_IDEAS}
+          activeTheme={activeTheme}
+          onOpenThemeModal={() => setThemeModalMode('launcher')}
+          busyAction={busyAction}
+          errorMsg={errorMsg}
+          onSubmitIdea={() => void handleLauncherSubmit()}
+          onOpenProject={(pid) => void openProjectInWorkspace(pid)}
+          onCreateBlankProject={() => void handleNewBlankProject()}
+          onDeleteProject={(pid) => void handleDeleteProject(pid)}
+        />
+        <StyleThemeModal
+          open={Boolean(themeModalMode)}
+          mode={themeModalMode ?? 'launcher'}
+          onClose={() => setThemeModalMode(null)}
+          selectedThemeId={selectedThemeId}
+          builtinThemes={BUILTIN_STYLE_THEMES}
+          customThemes={customThemes}
+          onSelectTheme={handleApplyThemeSelection}
+          onSaveCustomTheme={handleSaveCustomTheme}
+          onDeleteCustomTheme={handleDeleteCustomTheme}
+          onImportCustomThemes={handleImportCustomThemes}
+        />
+      </>
     );
   }
 
@@ -1419,6 +1532,174 @@ export function Workbench() {
                       </button>
                     );
                   })}
+                </div>
+
+                {/* UI Design System & Style Theme Decision Card */}
+                <div className="rounded-xl border border-black/[0.08] bg-[#f8f8f6] p-2.5 space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <Palette className="w-3.5 h-3.5 text-[#4267ff] shrink-0" />
+                      <span className="text-[11px] font-semibold text-[#0c0c0c]/90 truncate">
+                        {editablePlan.designSystem
+                          ? `UI 场景 ${editablePlan.designSystem.scenario} · ${editablePlan.designSystem.scenarioName}`
+                          : 'UI 设计方案'}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setThemeModalMode('emma')}
+                      className="inline-flex items-center gap-1 rounded-full border border-black/[0.1] bg-white px-2.5 py-0.5 text-[10px] font-medium text-[#4267ff] hover:border-[#4267ff]/40 cursor-pointer shrink-0"
+                    >
+                      {editablePlan.designSystem?.themeName
+                        ? `已选：${editablePlan.designSystem.themeName}`
+                        : '切换主题 / 自定义'}
+                    </button>
+                  </div>
+
+                  {editablePlan.designSystem && (
+                    <>
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-1.5">
+                          {(
+                            [
+                              {
+                                label: '底色',
+                                hex: editablePlan.designSystem.palette.background,
+                              },
+                              {
+                                label: '表面',
+                                hex: editablePlan.designSystem.palette.surface,
+                              },
+                              {
+                                label: '主字',
+                                hex: editablePlan.designSystem.palette.textPrimary,
+                              },
+                              {
+                                label: '辅字',
+                                hex: editablePlan.designSystem.palette.textMuted,
+                              },
+                              {
+                                label: '强调',
+                                hex: editablePlan.designSystem.palette.accent,
+                              },
+                            ] as const
+                          ).map((sw) => (
+                            <span
+                              key={sw.label}
+                              title={`${sw.label}: ${sw.hex}`}
+                              className="w-4 h-4 rounded-full border border-black/15 shrink-0"
+                              style={{ backgroundColor: sw.hex }}
+                            />
+                          ))}
+                          <span className="text-[10px] text-[#0c0c0c]/55 ml-1">
+                            {editablePlan.designSystem.typography.headingStyle ===
+                            'editorial-serif'
+                              ? '衬线编辑标题'
+                              : editablePlan.designSystem.typography.headingStyle ===
+                                  'geometric-sans'
+                                ? '几何无衬线'
+                                : '极简无衬线'}
+                          </span>
+                        </div>
+
+                        <div className="flex items-center gap-1">
+                          <select
+                            aria-label="调整 UI 设计场景"
+                            value={editablePlan.designSystem.scenario}
+                            onChange={(e) => {
+                              const nextId = e.target.value as DesignScenarioId;
+                              const nextDef = DESIGN_SCENARIOS[nextId];
+                              const prevDs = editablePlan.designSystem!;
+                              setEditablePlan({
+                                ...editablePlan,
+                                designSystem: {
+                                  ...prevDs,
+                                  scenario: nextId,
+                                  scenarioName: nextDef.name,
+                                  colorMode: nextDef.defaultColorMode,
+                                  palette: { ...nextDef.defaultPalette },
+                                  typography: { ...nextDef.defaultTypography },
+                                  layoutBlueprint: nextDef.layoutRules,
+                                  antiPatterns: nextDef.antiPatterns,
+                                  themeId: undefined,
+                                  themeName: undefined,
+                                },
+                              });
+                            }}
+                            className="rounded-lg border border-black/[0.1] bg-white px-1.5 py-0.5 text-[10px] text-[#0c0c0c]/80 focus:border-[#4267ff] focus:outline-none"
+                          >
+                            {(Object.keys(DESIGN_SCENARIOS) as DesignScenarioId[]).map(
+                              (sid) => (
+                                <option key={sid} value={sid}>
+                                  场景 {sid} · {DESIGN_SCENARIOS[sid].shortLabel}
+                                </option>
+                              )
+                            )}
+                          </select>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const prevDs = editablePlan.designSystem!;
+                              const nextMode =
+                                prevDs.colorMode === 'dark' ? 'light' : 'dark';
+                              setEditablePlan({
+                                ...editablePlan,
+                                designSystem: {
+                                  ...prevDs,
+                                  colorMode: nextMode,
+                                  palette:
+                                    nextMode === 'dark'
+                                      ? {
+                                          ...prevDs.palette,
+                                          background: '#0E0F12',
+                                          surface: '#16181E',
+                                          textPrimary: '#F3F2EE',
+                                          textMuted: '#9B9A94',
+                                        }
+                                      : {
+                                          ...prevDs.palette,
+                                          background: '#FAF8F4',
+                                          surface: '#FFFFFF',
+                                          textPrimary: '#1D1916',
+                                          textMuted: '#6E665E',
+                                        },
+                                },
+                              });
+                            }}
+                            className="rounded-lg border border-black/[0.1] bg-white px-2 py-0.5 text-[10px] font-medium text-[#0c0c0c]/75 hover:bg-black/[0.04] cursor-pointer"
+                          >
+                            {editablePlan.designSystem.colorMode === 'dark'
+                              ? '深色'
+                              : '浅色'}
+                          </button>
+                        </div>
+                      </div>
+
+                      <p className="text-[11px] text-[#0c0c0c]/65 leading-relaxed line-clamp-2">
+                        焦点：{editablePlan.designSystem.visualFocalPoint}
+                      </p>
+
+                      <input
+                        type="text"
+                        aria-label="自定义风格提示词微调"
+                        maxLength={2000}
+                        value={editablePlan.designSystem.customStylePrompt ?? ''}
+                        onChange={(e) => {
+                          const prevDs = editablePlan.designSystem!;
+                          setEditablePlan({
+                            ...editablePlan,
+                            designSystem: {
+                              ...prevDs,
+                              customStylePrompt: e.target.value,
+                            },
+                          });
+                        }}
+                        placeholder="补充风格微调（如：大留白编辑风、不要统计卡片、用陶土棕点缀）..."
+                        className="w-full rounded-lg border border-black/[0.08] bg-white px-2.5 py-1 text-[11px] text-[#0c0c0c]/85 placeholder:text-[#0c0c0c]/35 focus:border-[#4267ff] focus:outline-none"
+                      />
+                    </>
+                  )}
                 </div>
 
                 {/* Linear vs Race Mode Segmented Switch */}
@@ -2094,6 +2375,22 @@ export function Workbench() {
           )}
         </main>
       </div>
+      <StyleThemeModal
+        open={Boolean(themeModalMode)}
+        mode={themeModalMode ?? 'emma'}
+        onClose={() => setThemeModalMode(null)}
+        selectedThemeId={
+          themeModalMode === 'emma'
+            ? (editablePlan?.designSystem?.themeId ?? 'auto')
+            : selectedThemeId
+        }
+        builtinThemes={BUILTIN_STYLE_THEMES}
+        customThemes={customThemes}
+        onSelectTheme={handleApplyThemeSelection}
+        onSaveCustomTheme={handleSaveCustomTheme}
+        onDeleteCustomTheme={handleDeleteCustomTheme}
+        onImportCustomThemes={handleImportCustomThemes}
+      />
     </div>
   );
 }

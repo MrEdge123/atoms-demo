@@ -520,6 +520,7 @@ export function TimelineStream({
         }
 
         if (item.kind === 'emma_plan') {
+          const ds = item.plan.designSystem;
           return (
             <div key={item.key} className="space-y-1.5">
               <div className="flex items-center gap-2">
@@ -528,11 +529,17 @@ export function TimelineStream({
                   Emma · 产品经理
                 </span>
               </div>
-              <div className="ml-2.5 pl-4 border-l border-dashed border-black/15">
+              <div className="ml-2.5 pl-4 border-l border-dashed border-black/15 space-y-1">
                 <p className="text-xs text-[#0c0c0c]/75">
                   已整理「<span className="font-medium text-[#0c0c0c]/95">{item.plan.appName}</span>
                   」产品规格与 {item.plan.collections.length} 个云端数据集合，请在下方方案卡确认后启动构建。
                 </p>
+                {ds && (
+                  <p className="text-[11px] text-[#0c0c0c]/55">
+                    UI 设计：场景 {ds.scenario} · {ds.scenarioName}（{ds.colorMode === 'dark' ? '深色' : '浅色'}
+                    {ds.themeName ? ` · 主题「${ds.themeName}」` : ''}）
+                  </p>
+                )}
               </div>
             </div>
           );

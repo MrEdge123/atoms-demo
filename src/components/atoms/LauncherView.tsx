@@ -8,13 +8,14 @@ import {
   FolderKanban,
   Home,
   Layers,
+  Palette,
   PanelLeftClose,
   PanelLeftOpen,
   Plus,
   Sparkles,
   Trash2,
 } from 'lucide-react';
-import type { Project } from '@/domain';
+import type { Project, StyleThemeSpec } from '@/domain';
 import type { ModelInfo } from '@/ports';
 import {
   AgentCluster,
@@ -38,6 +39,8 @@ interface LauncherViewProps {
   idea: string;
   onIdeaChange: (value: string) => void;
   presets: DemoIdeaPreset[];
+  activeTheme: StyleThemeSpec | null;
+  onOpenThemeModal: () => void;
   busyAction: string;
   errorMsg: string;
   onSubmitIdea: () => void;
@@ -59,6 +62,8 @@ export function LauncherView({
   idea,
   onIdeaChange,
   presets,
+  activeTheme,
+  onOpenThemeModal,
   busyAction,
   errorMsg,
   onSubmitIdea,
@@ -288,14 +293,40 @@ export function LauncherView({
                     ))}
                   </div>
 
-                  <button
-                    type="submit"
-                    disabled={Boolean(busyAction) || !idea.trim()}
-                    className="inline-flex items-center gap-1.5 rounded-full bg-[#4267ff] px-4 py-2 text-xs font-semibold text-white hover:bg-[#425ce1] transition disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
-                  >
-                    <span>{busyAction || '开始构建'}</span>
-                    <ArrowRight className="w-3.5 h-3.5" />
-                  </button>
+                  <div className="flex items-center gap-2 ml-auto">
+                    <button
+                      type="button"
+                      onClick={onOpenThemeModal}
+                      aria-label="选择或自定义 UI 风格主题"
+                      className="inline-flex items-center gap-1.5 rounded-full border border-black/[0.1] bg-[#fcfcfb] px-3 py-1.5 text-[11px] font-medium text-[#0c0c0c]/80 hover:border-[#4267ff]/45 hover:text-[#4267ff] transition cursor-pointer"
+                    >
+                      <Palette className="w-3.5 h-3.5 text-[#4267ff]" />
+                      <span>
+                        {activeTheme ? `主题：${activeTheme.name}` : '主题：智能匹配'}
+                      </span>
+                      {activeTheme && (
+                        <span className="inline-flex items-center -space-x-0.5 ml-0.5">
+                          <span
+                            className="w-2.5 h-2.5 rounded-full border border-black/15"
+                            style={{ backgroundColor: activeTheme.palette.background }}
+                          />
+                          <span
+                            className="w-2.5 h-2.5 rounded-full border border-black/15"
+                            style={{ backgroundColor: activeTheme.palette.accent }}
+                          />
+                        </span>
+                      )}
+                    </button>
+
+                    <button
+                      type="submit"
+                      disabled={Boolean(busyAction) || !idea.trim()}
+                      className="inline-flex items-center gap-1.5 rounded-full bg-[#4267ff] px-4 py-2 text-xs font-semibold text-white hover:bg-[#425ce1] transition disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                    >
+                      <span>{busyAction || '开始构建'}</span>
+                      <ArrowRight className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
                 </div>
               </form>
             </div>

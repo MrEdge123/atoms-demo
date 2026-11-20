@@ -43,20 +43,88 @@ function getTailwindCompiler(): Promise<TailwindCompiler> {
   return cachedTailwindCompiler;
 }
 
+const CODE_SCAN_EXTENSIONS = new Set([
+  '.tsx',
+  '.ts',
+  '.jsx',
+  '.js',
+  '.css',
+  '.html',
+]);
+
+function shouldScanForTailwind(filePath: string): boolean {
+  const dot = filePath.lastIndexOf('.');
+  if (dot === -1) return false;
+  return CODE_SCAN_EXTENSIONS.has(filePath.slice(dot).toLowerCase());
+}
+
 function extractTailwindCandidates(sources: string[]): string[] {
   const tokens = new Set<string>();
-  const pattern = /[a-zA-Z0-9_:[\]#./%-]+/g;
+  const pattern = /[a-zA-Z0-9_:[\]#./()%,-]+/g;
+  const whitespaceSplit = /[^\s"'`<>={}]+/g;
   for (const src of sources) {
     const matches = src.match(pattern);
-    if (!matches) continue;
-    for (const token of matches) {
-      if (token.length >= 2 && token.length <= 80) {
-        tokens.add(token);
+    if (matches) {
+      for (const token of matches) {
+        if (token.length >= 2 && token.length <= 120) {
+          tokens.add(token);
+        }
+      }
+    }
+    const rawMatches = src.match(whitespaceSplit);
+    if (rawMatches) {
+      for (const token of rawMatches) {
+        if (token.length >= 2 && token.length <= 120) {
+          tokens.add(token);
+        }
       }
     }
   }
   return Array.from(tokens);
 }
+
+const DESIGN_BASE_CSS = `
+html, body {
+  margin: 0;
+  overflow-x: hidden;
+  scroll-behavior: smooth;
+}
+.font-editorial, .font-serif {
+  font-family: "Source Han Serif SC", "Noto Serif SC", "Songti SC", "STZhongsong", "Playfair Display", Georgia, serif;
+}
+.font-display, .font-sans {
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", ui-sans-serif, system-ui, sans-serif;
+}
+.font-mono {
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+@keyframes atomsFadeUp {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.animate-atoms-enter {
+  animation: atomsFadeUp 0.45s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+`.trim();
 
 function escapeHtml(text: string): string {
   return text
@@ -343,11 +411,16 @@ export class EsbuildStaticBuilder implements AppBuilder {
         .join('\n');
 
       const tw = await getTailwindCompiler();
+      const scannableSources = Object.entries(normalizedFs)
+        .filter(([filePath]) => shouldScanForTailwind(filePath))
+        .map(([, fileContent]) => fileContent);
       const candidates = extractTailwindCandidates([
         wrapperSource,
-        ...Object.values(normalizedFs),
+        ...scannableSources,
       ]);
-      const compiledCss = tw.build(candidates) + (extraCss ? `\n${extraCss}` : '');
+      const compiledCss =
+        `${DESIGN_BASE_CSS}\n${tw.build(candidates)}` +
+        (extraCss ? `\n${extraCss}` : '');
 
       const seoTitle = escapeHtml(input.seo?.title || 'Atoms App');
       const seoDescription = escapeHtml(
@@ -378,7 +451,7 @@ export class EsbuildStaticBuilder implements AppBuilder {
   <meta property="og:description" content="${seoDescription}" />${seoUrlMeta}
   <style>${compiledCss}</style>
 </head>
-<body class="antialiased bg-white text-slate-900">
+<body class="antialiased font-display">
   <div id="root"></div>
   <script>window.__ATOMS_CONFIG__ = ${runtimeJson};</script>
   <script>${safeInlineScript(bundledJs)}</script>

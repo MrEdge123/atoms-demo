@@ -1,6 +1,10 @@
-import type { ProductPlan, VirtualFS } from '../../domain';
+import type {
+  DesignScenarioId,
+  ProductPlan,
+  VirtualFS,
+} from '../../domain';
 import type { LLMProvider, ModelInfo, SchemaLike } from '../../ports';
-import type { AlexFilesOutput } from '../../core';
+import { DESIGN_SCENARIOS, type AlexFilesOutput } from '../../core';
 
 function extractSection(text: string, marker: string, stopMarker?: string): string {
   const idx = text.indexOf(marker);
@@ -74,7 +78,14 @@ function deriveItemLabel(
   return fallbackLabel;
 }
 
-function inferDomainTemplate(ideaText: string) {
+function inferDomainTemplate(ideaText: string): {
+  appName: string;
+  summary: string;
+  collection: string;
+  itemLabel: string;
+  fields: string[];
+  scenario: DesignScenarioId;
+} {
   const lower = ideaText.toLowerCase();
   if (lower.includes('crm') || lower.includes('客户') || lower.includes('leads')) {
     return {
@@ -83,6 +94,7 @@ function inferDomainTemplate(ideaText: string) {
       collection: 'leads',
       itemLabel: '客户线索',
       fields: ['name', 'company', 'stage', 'notes'],
+      scenario: 'B',
     };
   }
   if (
@@ -97,6 +109,7 @@ function inferDomainTemplate(ideaText: string) {
       collection: 'notes',
       itemLabel: '笔记条目',
       fields: ['title', 'tag', 'content', 'pinned'],
+      scenario: 'E',
     };
   }
   return {
@@ -105,6 +118,7 @@ function inferDomainTemplate(ideaText: string) {
     collection: 'registrations',
     itemLabel: '报名记录',
     fields: ['name', 'contact', 'status', 'remark'],
+    scenario: 'B',
   };
 }
 
@@ -631,6 +645,7 @@ export class MockLLMProvider implements LLMProvider {
           '\n\nIris Research Insights:'
         ) || input.prompt;
       const template = inferDomainTemplate(idea);
+      const scenarioDef = DESIGN_SCENARIOS[template.scenario];
       const output = {
         appName: template.appName,
         summary: template.summary,
@@ -651,6 +666,21 @@ export class MockLLMProvider implements LLMProvider {
             description: `${template.itemLabel}云端持久化集合`,
           },
         ],
+        designSystem: {
+          scenario: scenarioDef.id,
+          scenarioName: scenarioDef.name,
+          tone: scenarioDef.toneKeywords,
+          colorMode: scenarioDef.defaultColorMode,
+          palette: scenarioDef.defaultPalette,
+          typography: scenarioDef.defaultTypography,
+          radiusStyle: scenarioDef.defaultRadiusStyle,
+          surfaceDepth: scenarioDef.defaultSurfaceDepth,
+          layoutBlueprint: scenarioDef.layoutRules,
+          visualFocalPoint: '首屏主标题与核心业务列表形成唯一视觉焦点',
+          motionStyle: scenarioDef.motionRules,
+          mediaStrategy: scenarioDef.mediaRule,
+          antiPatterns: scenarioDef.antiPatterns,
+        },
       };
       return input.schema.parse(output);
     }
@@ -712,7 +742,10 @@ export class MockLLMProvider implements LLMProvider {
     );
 
     const isBranchB =
-      input.prompt.includes('branch-b') || input.prompt.includes('暗夜极客');
+      input.prompt.includes('Branch ID: branch-b') ||
+      input.prompt.includes('branch-b') ||
+      input.prompt.includes('暗夜极客') ||
+      input.prompt.includes('暗调');
     const isIteration = input.prompt.includes('User Iteration Instruction:');
     const instruction = isIteration
       ? extractSection(

@@ -14,6 +14,70 @@ export const researchOutputSchema = z.object({
 
 export type ResearchOutput = z.infer<typeof researchOutputSchema>;
 
+const stylePaletteSchema = z.object({
+  background: z.string().min(1).max(40),
+  surface: z.string().min(1).max(40),
+  textPrimary: z.string().min(1).max(40),
+  textMuted: z.string().min(1).max(40),
+  accent: z.string().min(1).max(40),
+});
+
+const styleTypographySchema = z.object({
+  headingStyle: z.enum(['editorial-serif', 'geometric-sans', 'minimal-sans']),
+  bodyStyle: z.enum(['sans', 'serif']),
+});
+
+export const designScenarioIdSchema = z.enum([
+  'A',
+  'B',
+  'C',
+  'D',
+  'E',
+  'F',
+  'G',
+]);
+
+export const styleThemeSchema = z.object({
+  id: z.string().min(1).max(64),
+  name: z.string().min(1).max(60),
+  description: z.string().max(240).optional(),
+  scenario: designScenarioIdSchema.optional(),
+  colorMode: z.enum(['light', 'dark']),
+  palette: stylePaletteSchema,
+  typography: styleTypographySchema,
+  radiusStyle: z.enum(['sharp', 'soft', 'pill']).optional(),
+  surfaceDepth: z
+    .enum(['hairline', 'subtle-shadow', 'stepped-dark'])
+    .optional(),
+  stylePrompt: z.string().max(2000),
+  isCustom: z.boolean().optional(),
+});
+
+export const designSystemSchema = z.object({
+  scenario: designScenarioIdSchema,
+  scenarioName: z.string().min(1),
+  tone: z.string().min(1),
+  colorMode: z.enum(['light', 'dark']),
+  palette: stylePaletteSchema,
+  typography: z.object({
+    headingStyle: z.enum(['editorial-serif', 'geometric-sans', 'minimal-sans']),
+    bodyStyle: z.enum(['sans', 'serif']),
+    rationale: z.string(),
+  }),
+  radiusStyle: z.enum(['sharp', 'soft', 'pill']).optional(),
+  surfaceDepth: z
+    .enum(['hairline', 'subtle-shadow', 'stepped-dark'])
+    .optional(),
+  layoutBlueprint: z.string().min(1),
+  visualFocalPoint: z.string().min(1),
+  motionStyle: z.string().min(1),
+  mediaStrategy: z.string().optional(),
+  antiPatterns: z.array(z.string()),
+  themeId: z.string().max(64).optional(),
+  themeName: z.string().max(60).optional(),
+  customStylePrompt: z.string().max(2000).optional(),
+});
+
 /**
  * Structured product blueprint produced by Emma (Product Manager Agent).
  */
@@ -43,6 +107,7 @@ export const productPlanSchema = z.object({
       description: z.string(),
     })
   ),
+  designSystem: designSystemSchema.optional(),
 });
 
 /**

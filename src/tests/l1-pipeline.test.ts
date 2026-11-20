@@ -1,4 +1,12 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import {
+  BUILTIN_STYLE_THEMES,
+  buildAlexGeneratePrompt,
+  getRaceDirectionsForPlan,
+  renderDesignMarkdown,
+} from '@/core';
 import {
   CreemBillingAdapter,
   MockBillingAdapter,
@@ -601,4 +609,98 @@ describe('L1: Core contracts, SOP orchestration, Esbuild, Race Mode & Billing', 
 
     await c.close();
   });
+
+  it('integrates UI design guide, generates DESIGN.md after confirmation, differentiates scenarios, and compiles arbitrary Tailwind utilities', async () => {
+    const guidePath = path.resolve(
+      process.cwd(),
+      'docs/08-ui-design-guide.md'
+    );
+    expect(fs.existsSync(guidePath)).toBe(true);
+    const guideText = fs.readFileSync(guidePath, 'utf8');
+    expect(guideText).toContain('通用设计原则');
+    expect(guideText).toContain('交付前自查清单');
+
+    const craftTheme = BUILTIN_STYLE_THEMES.find(
+      (t) => t.id === 'preset-craft-atelier'
+    );
+    expect(craftTheme).toBeTruthy();
+
+    const c = await createContainer({
+      storageAdapter: 'memory',
+      publisherAdapter: 'memory',
+      builderAdapter: 'esbuild',
+      llmAdapter: 'mock',
+    });
+
+    const proj = await c.repo.create({
+      title: '器物集测试',
+      slug: 'craft-design-test',
+    });
+
+    await collect(
+      c.workflow.start(proj.id, '做一个手作陶瓷茶器与预约品鉴官网', {
+        styleTheme: craftTheme,
+      })
+    );
+
+    const afterStart = await c.repo.getById(proj.id);
+    expect(Object.keys(afterStart?.draftFiles ?? {})).toHaveLength(0);
+    expect(afterStart?.plan?.designSystem?.scenario).toBe('D');
+    expect(afterStart?.plan?.designSystem?.themeId).toBe('preset-craft-atelier');
+    expect(afterStart?.plan?.designSystem?.palette.accent).toBe('#9A522B');
+
+    const raceDirsD = getRaceDirectionsForPlan(afterStart?.plan);
+    const raceDirsB = getRaceDirectionsForPlan(null);
+    expect(raceDirsD[0]?.label).not.toBe(raceDirsB[0]?.label);
+    expect(raceDirsD[1]?.label).toContain('暗调');
+
+    const alexPrompt = buildAlexGeneratePrompt({
+      plan: afterStart!.plan!,
+      designMd: renderDesignMarkdown(afterStart!.plan!),
+    });
+    expect(alexPrompt.system).toContain('SCENARIO D SPECIFIC CRAFT RULES');
+    expect(alexPrompt.system).toContain('#9A522B');
+    expect(alexPrompt.system).toContain('Pre-Delivery Self-Checklist');
+
+    await collect(c.workflow.confirmPlan(proj.id, { mode: 'linear' }));
+    const afterBuild = await c.repo.getById(proj.id);
+    const designMd = afterBuild?.draftFiles['DESIGN.md'] ?? '';
+    expect(designMd).toContain('## Direction & Layout');
+    expect(designMd).toContain('## Tokens');
+    expect(designMd).toContain('#9A522B');
+    expect(designMd).toContain('匠心器物');
+
+    const builder = new EsbuildStaticBuilder();
+    const compiled = await builder.compile({
+      files: {
+        'DESIGN.md': '# DESIGN\nKeep class-[should_not_break]',
+        'src/App.tsx': `import React from 'react';
+export default function App() {
+  return (
+    <main className="min-h-screen bg-[#FAF8F4] text-[clamp(1.25rem,3vw,2.5rem)] border border-[rgba(12,12,12,0.08)] transition duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] font-editorial">
+      器物集
+    </main>
+  );
+}`,
+      },
+      projectId: 'proj_design_css',
+      apiBaseUrl: 'http://localhost:3000',
+      capabilities: ['db'],
+      mode: 'preview',
+    });
+    expect(compiled.ok).toBe(true);
+    if (compiled.ok) {
+      const styleSection = compiled.html.slice(
+        compiled.html.indexOf('<style>'),
+        compiled.html.indexOf('</style>')
+      );
+      expect(styleSection).toContain('.font-editorial');
+      expect(styleSection).toContain('prefers-reduced-motion');
+      expect(styleSection).toContain('rgba(12,12,12,0.08)');
+      expect(styleSection).toContain('cubic-bezier(0.22,1,0.36,1)');
+      expect(styleSection).toContain('clamp(1.25rem, 3vw, 2.5rem)');
+    }
+
+    await c.close();
+  }, 15000);
 });

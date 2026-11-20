@@ -1,4 +1,9 @@
-import type { AgentEvent, ProductPlan, Project } from '../domain';
+import type {
+  AgentEvent,
+  ProductPlan,
+  Project,
+  StyleThemeSpec,
+} from '../domain';
 import type { PublishResult } from './publisher';
 
 /**
@@ -9,7 +14,7 @@ export interface WorkflowEngine {
   start(
     projectId: string,
     idea: string,
-    opts?: { model?: string }
+    opts?: { model?: string; styleTheme?: StyleThemeSpec }
   ): AsyncIterable<AgentEvent>;
 
   confirmPlan(

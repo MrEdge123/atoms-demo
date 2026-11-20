@@ -2,10 +2,13 @@ export type {
   AppRecord,
   AppUser,
   CloudCapability,
+  DesignScenarioId,
+  DesignSystemSpec,
   ProductPlan,
   Project,
   ProjectStatus,
   RaceBranch,
+  StyleThemeSpec,
   VirtualFS,
 } from './workspace';
 
