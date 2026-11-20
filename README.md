@@ -32,8 +32,25 @@
 ### 环境变量配置（`.env.local`）
 参考 [.env.example](./.env.example)：
 - 离线默认模式无需配置任何外部密钥即可完整跑通（`LLM_ADAPTER=mock`、`STORAGE_ADAPTER=pglite`、`BILLING_ADAPTER=mock`）。
-- 接入真实大模型时填入 `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `DEEPSEEK_API_KEY` 并设 `LLM_ADAPTER=vercel-ai`。
-- 部署云端 Postgres 时设 `STORAGE_ADAPTER=postgres` 并填入 `DATABASE_URL`。
+- 接入真实大模型时填入 `DEEPSEEK_API_KEY`（及可选 `KIMI_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`）并设 `LLM_ADAPTER=vercel-ai`（默认模型为 `deepseek:deepseek-flash`，支持切换 `deepseek-v4-pro` 与 Kimi 系列共 7 个模型选项）。
+- 部署云端 Postgres 时设 `STORAGE_ADAPTER=postgres`、`DATABASE_URL` 与强随机 `APP_AUTH_SECRET`。
+
+### 线上部署架构（第二阶段已完成）
+- **在线工作台**：<https://xcodea.online>（`www.xcodea.online` 301 重定向至 apex 域名）
+- **在线独立发布示例**：<https://xcodea.online/s/app-otqlo>（`山丘手冲烘焙工坊`，含真实 PostgreSQL 持久化、端用户登录、Pro 订阅解锁与 OG 元信息）
+- **GitHub Public 仓库**：<https://github.com/MrEdge123/atoms-demo>
+- **生产部署拓扑**（腾讯云轻量 `Docker Compose`，配置文件见 [`docker-compose.yml`](./docker-compose.yml) 与 [`Caddyfile`](./Caddyfile)）：
+  - `caddy:2-alpine`：自动签发/续期 Let's Encrypt HTTPS 证书，启用非 SSE 路由 `zstd`/`gzip` 压缩，SSE 流透传 `flush_interval -1`。
+  - `app`：Next.js 15 `output: 'standalone'` 容器，运行 `STORAGE_ADAPTER=postgres`、`LLM_ADAPTER=vercel-ai`、`BILLING_ADAPTER=mock`。
+  - `postgres:16-alpine`：挂载命名持久卷 `postgres_data`，容器重建/重启后项目与 `@atoms/cloud` 数据完整保留。
+
+```bash
+# 生产环境变量模板（Compose 读取同目录 .env 文件，请填入 POSTGRES_PASSWORD / APP_AUTH_SECRET / SITE_DOMAIN / APP_BASE_URL 与真实模型密钥）
+cp .env.production.example .env
+
+# 启动 Docker Compose 全栈（Postgres 16 + Next.js Standalone + Caddy HTTPS）
+docker compose up -d --build
+```
 
 ### 常用命令（Windows `Node v24.18.1`）
 
@@ -47,8 +64,11 @@ npm test
 # 构建生产包
 npm run build
 
-# 运行端到端 HTTP 冒烟脚本（起真实 next start + PGlite + Esbuild）
-node scripts/e2e-http-smoke.mjs
+# 运行真实大模型 5 模型连通性探测（需提前在 .env.local 配置真实 Key）
+node scripts/verify-live-llm.mjs
+
+# 运行端到端 HTTP 冒烟脚本（本地可不带参数；线上可直接传入公网地址）
+node scripts/e2e-http-smoke.mjs https://xcodea.online
 
 # 启动本地生产服务（默认 http://localhost:3000）
 npm run start
