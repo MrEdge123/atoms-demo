@@ -19,7 +19,7 @@
 ### 1.2 工程侧重点落地
 | 工程关注点 | 本项目实现做法 |
 | :--- | :--- |
-| **全链路可用性** | 端到端链路跑通、PostgreSQL 真持久化、项目重命名/级联删除、源码在线编辑重编译，配合 22 用例 L1/L2 自动化测试与 18 步 HTTP 冒烟脚本 |
+| **全链路可用性** | 端到端链路跑通、PostgreSQL 真持久化、项目重命名/级联删除、源码在线编辑重编译，配合 23 用例 L1/L2 自动化测试与 18 步 HTTP 冒烟脚本 |
 | **架构与取舍** | 采用「路线 A+」（内存 Esbuild + 托管 `@atoms/cloud` BaaS）避免动态容器冷启动慢与端口编排风险；Ports & Adapters 分层隔离内核与适配器 |
 | **交互体验** | 参考 Atoms 双态工作台布局，提供折叠步骤时间轴、强确认门禁与 Race 分支草稿/线上三态隔离 |
 | **编译自愈与安全边界** | 服务端 `esbuild` 编译错误自动触发最多 2 轮修复；预览态支持运行期报错一键回传修复；接口层面补齐签名 Cookie、防伪头校验、CSP、AI 限流与事务控制 |
@@ -57,7 +57,7 @@
 
 ### 3.1 公网必交物清单
 1. **在线工作台**：<https://xcodea.online>（`https://www.xcodea.online` 经 Caddy `301` 跳转至 apex）
-2. **线上独立发布示例站**：<https://xcodea.online/s/app-otqlo>（项目 `proj_805be62d` / `山丘手冲烘焙工坊`）
+2. **线上独立发布示例站**：<https://xcodea.online/s/app-otqlo>（项目 `proj_f83a4fe0` / `山丘手冲烘焙工坊`，`owner_sid = NULL` 只读示例）
 3. **Public GitHub 仓库**：<https://github.com/MrEdge123/atoms-demo>
 4. **生产编排产物**：`Dockerfile`、`docker-compose.yml`、`Caddyfile`、`next.config.ts`（`output: 'standalone'`）、`.env.production.example`、`scripts/verify-live-llm.mjs`、`scripts/e2e-http-smoke.mjs`
 

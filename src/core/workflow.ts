@@ -359,6 +359,7 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
               plan: branchPlan,
               designMd,
               branchId: dir.branchId,
+              branchLabel: dir.label,
               styleDirection: `${dir.label}: ${dir.styleDirection}`,
             });
 

@@ -64,6 +64,7 @@ export function buildAlexGeneratePrompt(input: {
   designMd?: string;
   styleDirection?: string;
   branchId?: string;
+  branchLabel?: string;
 }): { system: string; prompt: string } {
   const sdkDocs = getCloudSdkPromptDocs(input.plan.capabilities);
   const designMd =
@@ -96,6 +97,7 @@ ${designGuide}
 ${JSON.stringify(input.plan, null, 2)}
 
 ${input.branchId ? `Branch ID: ${input.branchId}` : ''}
+${input.branchLabel ? `Branch Label: ${input.branchLabel}` : ''}
 ${input.styleDirection ? `Visual Style Direction:\n${input.styleDirection}` : ''}
 
 Return all code files needed to run the app, ensuring "src/App.tsx" is the root component and follows DESIGN.md faithfully.`,

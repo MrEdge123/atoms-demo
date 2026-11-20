@@ -169,6 +169,6 @@ atoms-demo/
 
 | 层级 | 装配组合 | 运行形态 | 核心验收闭环 |
 | :--- | :--- | :--- | :--- |
-| **L1 契约与编排闭环** | `MockLLM` + **真实 `EsbuildStaticBuilder`** + `InMemoryAppCloud` + `MemoryProjectRepo` | 离线 0 Token 运行 **15 用例** L1 套件（`src/tests/l1-pipeline.test.ts`） | 1. 未确认方案前绝不触发 Alex 编码；<br>2. Race Mode 候选分支未显式采用前拦截发布与普通迭代，保留既有线上版本；<br>3. MockLLM 首轮故意生成坏 TSX → esbuild 真实报错 → 次轮 Auto-Fix 修好并产出 HTML；<br>4. 跨项目交错迭代不串用模板并保留增量功能；<br>5. 设计指南/主题切换对比度与 SSE 断开 `AbortController` 回滚校验。 |
+| **L1 契约与编排闭环** | `MockLLM` + **真实 `EsbuildStaticBuilder`** + `InMemoryAppCloud` + `MemoryProjectRepo` | 离线 0 Token 运行 **16 用例** L1 套件（`src/tests/l1-pipeline.test.ts`） | 1. 未确认方案前绝不触发 Alex 编码；<br>2. Race Mode 候选分支未显式采用前拦截发布与普通迭代，保留既有线上版本；<br>3. MockLLM 首轮故意生成坏 TSX → esbuild 真实报错 → 次轮 Auto-Fix 修好并产出 HTML；<br>4. 跨项目交错迭代不串用模板并保留增量功能；<br>5. 设计指南/主题切换对比度、SSE 断开 `AbortController` 回滚与 Mock Race 主题摘要校验。 |
 | **L2 真发布与持久化闭环** | 预置/生成 TSX + `EsbuildStaticBuilder` + **真实 PGlite / Postgres** + `SameOriginPublisher` | 离线 0 Token 运行 **4 用例** PGlite 套件 + **3 用例** Route Handlers 套件 | 真实 `PGlite` 重启跨进程恢复项目、事件流、Pro 订阅与业务数据；Webhook/选枝 SQL 事务回滚校验；路由集成全链路校验 `atoms_sid` / `403` / `429` / CSP / DB 权限与 Mock Checkout 鉴权。 |
 | **L3 真大模型回归闭环** | **真实 `VercelAISDKProvider`** + 全套真实 Adapter | 按需运行 | 固定 3 个 Golden Prompts（活动报名签到 / 轻量 CRM / 带登录与 Pro 开关的笔记站），统计编译一次通过率、Auto-Fix 挽回率与端到端耗时。 |

@@ -205,6 +205,7 @@ function buildMockReactFiles(opts: {
     accent: string;
   };
   headingStyle?: 'editorial-serif' | 'geometric-sans' | 'minimal-sans';
+  actionSummary?: string;
 }): AlexFilesOutput {
   const customBg = opts.palette?.background;
   const customSurface = opts.palette?.surface;
@@ -670,12 +671,75 @@ export default function App() {
 `;
 
   return {
-    summary: `已生成 ${opts.appName} 全栈前端应用并接入 @atoms/cloud（${opts.darkTheme ? '暗夜高转化风' : '极简亮色 SaaS 风'}）`,
+    summary:
+      opts.actionSummary ??
+      `已生成 ${opts.appName} 全栈前端应用并接入 @atoms/cloud`,
     files: [
       { path: 'src/components/AuthBar.tsx', content: authCardTsx },
       { path: 'src/App.tsx', content: appTsx },
     ],
   };
+}
+
+function resolveMockThemeLabel(input: {
+  prompt: string;
+  plan: ProductPlan | null;
+  darkTheme: boolean;
+}): string | undefined {
+  const explicitBranchLabel = extractSection(
+    input.prompt,
+    'Branch Label:',
+    '\n'
+  );
+  if (explicitBranchLabel) {
+    return explicitBranchLabel;
+  }
+
+  const styleDirSection = extractSection(
+    input.prompt,
+    'Visual Style Direction:',
+    '\n\nReturn all code files'
+  );
+  if (styleDirSection) {
+    const firstLine = styleDirSection.split(/\r?\n/)[0]?.trim() ?? '';
+    const colonIdx = firstLine.search(/[:：]/);
+    if (colonIdx > 0 && colonIdx <= 48) {
+      const candidate = firstLine.slice(0, colonIdx).trim();
+      if (candidate) return candidate;
+    }
+  }
+
+  const ds = input.plan?.designSystem;
+  if (ds && (ds.colorMode === 'dark') === input.darkTheme) {
+    const label = ds.themeName?.trim() || ds.scenarioName?.trim();
+    if (label) return label;
+  }
+
+  return undefined;
+}
+
+function resolveMockActionSummary(input: {
+  prompt: string;
+  appName: string;
+  plan: ProductPlan | null;
+  darkTheme: boolean;
+  isFix: boolean;
+  isIteration: boolean;
+}): string {
+  if (input.isFix) {
+    return `已修复 ${input.appName} 编译错误并接入 @atoms/cloud`;
+  }
+  if (input.isIteration) {
+    return `已按迭代指令更新 ${input.appName} 全栈前端应用并接入 @atoms/cloud`;
+  }
+  const themeLabel = resolveMockThemeLabel({
+    prompt: input.prompt,
+    plan: input.plan,
+    darkTheme: input.darkTheme,
+  });
+  return themeLabel
+    ? `已生成 ${input.appName} 全栈前端应用并接入 @atoms/cloud（${themeLabel}）`
+    : `已生成 ${input.appName} 全栈前端应用并接入 @atoms/cloud`;
 }
 
 /**
@@ -930,6 +994,14 @@ export class MockLLMProvider implements LLMProvider {
       includeCsvButton,
       palette: effectivePalette,
       headingStyle: plan?.designSystem?.typography?.headingStyle,
+      actionSummary: resolveMockActionSummary({
+        prompt: input.prompt,
+        appName,
+        plan,
+        darkTheme,
+        isFix,
+        isIteration,
+      }),
     });
 
     return input.schema.parse(files);

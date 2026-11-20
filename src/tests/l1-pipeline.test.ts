@@ -3,10 +3,12 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   BUILTIN_STYLE_THEMES,
+  alexFilesOutputSchema,
   buildAlexGeneratePrompt,
   getRaceDirectionsForPlan,
   renderDesignMarkdown,
 } from '@/core';
+import { MockLLMProvider } from '@/adapters/llm/mock';
 import {
   CreemBillingAdapter,
   MockBillingAdapter,
@@ -1398,4 +1400,114 @@ export default function App() {
     expect(firstRetryEv.value?.type).toBe('role_start');
     await secondIter.return?.();
   }, 15000);
+
+  it('matches Alex Race summaries to branch themes across initial Race, re-plan Race, and neutral fallback', async () => {
+    const c = await createContainer({
+      storageAdapter: 'memory',
+      publisherAdapter: 'memory',
+      builderAdapter: 'esbuild',
+      llmAdapter: 'mock',
+    });
+
+    try {
+      const amberCustomTheme = {
+        id: 'custom-amber-exp',
+        name: '琥珀实验主题',
+        description: '温暖纸感与琥珀实验视觉',
+        scenario: 'D' as const,
+        colorMode: 'light' as const,
+        palette: {
+          background: '#FAF6EE',
+          surface: '#FFFFFF',
+          textPrimary: '#241C15',
+          textMuted: '#6D6257',
+          accent: '#B45309',
+        },
+        typography: {
+          headingStyle: 'editorial-serif' as const,
+          bodyStyle: 'sans' as const,
+        },
+        stylePrompt: '暖纸底配合琥珀焦点与清晰留白',
+        isCustom: true,
+      };
+
+      const proj = await c.repo.create({
+        title: '活动报名琥珀 Race 测试',
+        slug: 'mock-race-amber-summary',
+      });
+
+      await collect(
+        c.workflow.start(
+          proj.id,
+          '做一个科技沙龙活动报名与签到管理系统，支持嘉宾议程与在线报名',
+          { model: 'mock-fast', styleTheme: amberCustomTheme }
+        )
+      );
+
+      const raceEvents1 = await collect(
+        c.workflow.confirmPlan(proj.id, { mode: 'race', model: 'mock-fast' })
+      );
+      const afterRace1 = await c.repo.getById(proj.id);
+      const labels1 = afterRace1?.raceBranches.map((b) => ({
+        branchId: b.branchId,
+        label: b.label,
+      }));
+      expect(labels1).toHaveLength(2);
+      expect(labels1?.[0]?.label).toBe('方案 A · 琥珀实验主题');
+      expect(labels1?.[1]?.label).toContain('暗调精品工坊风（同场景对比）');
+
+      for (const b of labels1 ?? []) {
+        const thought = raceEvents1.find(
+          (ev) => ev.type === 'thought' && ev.branchId === b.branchId
+        );
+        const msg = String(
+          (thought?.payload as { message?: string } | undefined)?.message ?? ''
+        );
+        expect(msg).toContain(b.label);
+        expect(msg).not.toContain('极简亮色 SaaS 风');
+        expect(msg).not.toContain('暗夜高转化风');
+      }
+
+      // Select Branch A, then re-plan on the SAME project and run Race Mode again
+      await c.workflow.selectBranch(proj.id, 'branch-a');
+      await collect(
+        c.workflow.start(
+          proj.id,
+          '重新规划为线下咖啡烘焙品鉴沙龙活动报名站',
+          { model: 'mock-fast', styleTheme: amberCustomTheme }
+        )
+      );
+      const raceEvents2 = await collect(
+        c.workflow.confirmPlan(proj.id, { mode: 'race', model: 'mock-fast' })
+      );
+      const afterRace2 = await c.repo.getById(proj.id);
+      expect(afterRace2?.raceBranches).toHaveLength(2);
+
+      for (const b of afterRace2?.raceBranches ?? []) {
+        const thought = raceEvents2.find(
+          (ev) => ev.type === 'thought' && ev.branchId === b.branchId
+        );
+        const msg = String(
+          (thought?.payload as { message?: string } | undefined)?.message ?? ''
+        );
+        expect(msg).toContain(b.label);
+        expect(msg).not.toContain('极简亮色 SaaS 风');
+        expect(msg).not.toContain('暗夜高转化风');
+      }
+
+      // Neutral summary fallback when theme cannot be determined from prompt or plan
+      const standaloneMock = new MockLLMProvider();
+      const neutralOut = await standaloneMock.generateObject({
+        system: 'You are Alex, generating a React web app.',
+        prompt: 'Build app without ProductPlan designSystem or Visual Style Direction.',
+        schema: alexFilesOutputSchema,
+        model: 'mock-fast',
+      });
+      expect(neutralOut.summary).toContain('全栈前端应用并接入 @atoms/cloud');
+      expect(neutralOut.summary).not.toContain('极简亮色 SaaS 风');
+      expect(neutralOut.summary).not.toContain('暗夜高转化风');
+    } finally {
+      await c.close();
+    }
+  }, 20000);
 });

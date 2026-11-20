@@ -29,7 +29,7 @@ interface AlexRunBlock {
   kind: 'alex_run';
   key: string;
   mode: 'linear' | 'race';
-  thoughts: string[];
+  thoughts: Array<{ message: string; branchId?: string }>;
   files: FileWriteItem[];
   autoFixRounds: number;
   buildResults: Array<{
@@ -155,7 +155,10 @@ function buildTimelineItems(events: AgentEvent[]): TimelineItem[] {
       }
 
       if (ev.type === 'thought' && typeof payload.message === 'string') {
-        currentAlex.thoughts.push(payload.message);
+        currentAlex.thoughts.push({
+          message: payload.message,
+          branchId: ev.branchId,
+        });
       } else if (ev.type === 'file_write' && typeof payload.path === 'string') {
         currentAlex.files.push({
           path: payload.path,
@@ -289,11 +292,24 @@ function AlexRunCard({
 
       {expanded && (
         <div className="ml-2.5 pl-4 border-l border-dashed border-black/15 space-y-2.5 py-0.5">
-          {run.thoughts.length > 0 && (
-            <p className="text-xs text-[#0c0c0c]/75 leading-relaxed">
-              {run.thoughts[run.thoughts.length - 1]}
-            </p>
-          )}
+          {run.thoughts.length > 0 &&
+            (run.mode === 'race' ? (
+              <div className="space-y-1">
+                {run.thoughts.map((t, idx) => (
+                  <p
+                    key={`${t.branchId ?? 'thought'}-${idx}`}
+                    className="text-xs text-[#0c0c0c]/75 leading-relaxed"
+                  >
+                    {t.branchId ? `[${t.branchId}] ` : ''}
+                    {t.message}
+                  </p>
+                ))}
+              </div>
+            ) : (
+              <p className="text-xs text-[#0c0c0c]/75 leading-relaxed">
+                {run.thoughts[run.thoughts.length - 1]?.message}
+              </p>
+            ))}
 
           {firstFile && (
             <div className="space-y-1.5">
