@@ -39,7 +39,7 @@ function sanitizeErrorMessage(err: unknown): string {
     .replace(/\bsk-[A-Za-z0-9_-]{6,}/g, 'sk-***')
     .replace(/\b(Bearer\s+)[A-Za-z0-9._-]+/gi, '$1***')
     .replace(
-      /((?:"|')?(?:api[_-]?key|access[_-]?token|auth[_-]?secret|authorization|token|secret)(?:"|')?\s*[:=]\s*(?:"|')?)[^\s'",;}\]]+/gi,
+      /((?:"|')?\b[A-Za-z0-9_-]{0,32}(?:key|token|secret|authorization)(?:"|')?\s*[:=]\s*(?:"|')?)[^\s'",;}\]]+/gi,
       '$1***'
     )
     .slice(0, 400);
