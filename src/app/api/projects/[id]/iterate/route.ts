@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import type { AgentMentionSpan } from '@/domain';
 import { getContainer } from '@/container';
 import { getMutationBlockReason } from '@/core';
 import {
@@ -34,14 +35,17 @@ export async function POST(
     instruction?: string;
     model?: string;
     targetRole?: string;
+    mentions?: unknown;
   };
-  const instruction = body.instruction?.trim();
+  const rawInput = typeof body.instruction === 'string' ? body.instruction : '';
+  const instruction = rawInput.trim();
   if (!instruction) {
     return NextResponse.json(
       { error: 'instruction is required' },
       { status: 400 }
     );
   }
+  const leadingTrim = rawInput.length - rawInput.trimStart().length;
 
   let targetRole: 'auto' | 'iris' | 'emma' | 'alex' | undefined;
   if (body.targetRole !== undefined) {
@@ -57,6 +61,50 @@ export async function POST(
       );
     }
     targetRole = body.targetRole;
+  }
+
+  let mentions: AgentMentionSpan[] | undefined;
+  if (body.mentions !== undefined) {
+    if (!Array.isArray(body.mentions)) {
+      return NextResponse.json(
+        { error: 'mentions must be an array' },
+        { status: 400 }
+      );
+    }
+    const sanitized: AgentMentionSpan[] = [];
+    for (const item of body.mentions) {
+      if (!item || typeof item !== 'object') continue;
+      const obj = item as Record<string, unknown>;
+      const role = obj.role;
+      const label = typeof obj.label === 'string' ? obj.label.trim() : '';
+      const rawStart = obj.start;
+      const rawEnd = obj.end;
+      if (
+        (role === 'iris' || role === 'emma' || role === 'alex') &&
+        label.length > 0 &&
+        label.length <= 32 &&
+        typeof rawStart === 'number' &&
+        typeof rawEnd === 'number' &&
+        Number.isInteger(rawStart) &&
+        Number.isInteger(rawEnd)
+      ) {
+        const start = rawStart - leadingTrim;
+        const end = rawEnd - leadingTrim;
+        if (start >= 0 && end > start && end <= instruction.length) {
+          sanitized.push({ role, label, start, end });
+        }
+      }
+    }
+    sanitized.sort((a, b) => a.start - b.start);
+    const nonOverlapping: AgentMentionSpan[] = [];
+    let cursor = 0;
+    for (const span of sanitized) {
+      if (span.start < cursor) continue;
+      nonOverlapping.push(span);
+      cursor = span.end;
+      if (nonOverlapping.length >= 10) break;
+    }
+    mentions = nonOverlapping;
   }
 
   const blockReason = getMutationBlockReason(project, 'iterate');
@@ -75,6 +123,7 @@ export async function POST(
       c.workflow.iterate(id, instruction, {
         model: body.model,
         targetRole,
+        mentions,
         signal,
       }),
     req

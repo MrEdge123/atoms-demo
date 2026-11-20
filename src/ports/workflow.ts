@@ -1,5 +1,6 @@
 import type {
   AgentEvent,
+  AgentMentionSpan,
   ProductPlan,
   Project,
   StyleThemeSpec,
@@ -39,6 +40,7 @@ export interface WorkflowEngine {
     opts?: {
       model?: string;
       targetRole?: 'auto' | 'iris' | 'emma' | 'alex';
+      mentions?: AgentMentionSpan[];
       signal?: AbortSignal;
     }
   ): AsyncIterable<AgentEvent>;

@@ -1676,7 +1676,8 @@ export default function App() {
       initialAppTsx
     );
 
-    // 3. Explicit targetRole or @Emma bypasses router and directly asks Emma
+    // 3. Explicit leading or mid-sentence @Emma bypasses router and directly asks Emma,
+    //    while email addresses like support@alex.com are NOT misparsed as @mentions.
     llmCalls.length = 0;
     const explicitEvents = await collect(
       workflow.iterate(project.id, '@Emma 按钮和背景该怎么搭配更和谐？', {
@@ -1692,6 +1693,95 @@ export default function App() {
         }
       )?.explicit
     ).toBe(true);
+
+    llmCalls.length = 0;
+    const midSentenceEvents = await collect(
+      workflow.iterate(project.id, '我想看看 @Emma 对配色有什么建议', {
+        model: 'mock-fast',
+      })
+    );
+    expect(llmCalls).toEqual(['emma_discuss']);
+    expect(
+      (
+        midSentenceEvents.find((ev) => ev.type === 'intent_routed')
+          ?.payload as { targetRole?: string; explicit?: boolean }
+      )?.targetRole
+    ).toBe('emma');
+
+    llmCalls.length = 0;
+    const emailEvents = await collect(
+      workflow.iterate(project.id, '把联系邮箱改成 support@alex.com', {
+        model: 'mock-fast',
+      })
+    );
+    expect(llmCalls[0]).toBe('router');
+    expect(
+      (
+        emailEvents.find((ev) => ev.type === 'intent_routed')?.payload as {
+          explicit?: boolean;
+          targetRole?: string;
+        }
+      )?.explicit
+    ).toBe(false);
+
+    // 3b. Structured mentions array (e.g. from MentionComposerInput chip) -> bypasses router even adjacent to CJK
+    llmCalls.length = 0;
+    const chipPrompt = '请帮我问问@Emma 对配色的建议';
+    const chipStart = chipPrompt.indexOf('@Emma');
+    const chipEvents = await collect(
+      workflow.iterate(project.id, chipPrompt, {
+        model: 'mock-fast',
+        mentions: [
+          {
+            role: 'emma',
+            label: '@Emma',
+            start: chipStart,
+            end: chipStart + '@Emma'.length,
+          },
+        ],
+      })
+    );
+    expect(llmCalls).toEqual(['emma_discuss']);
+    const chipRoleStartEv = chipEvents.find((ev) => ev.type === 'role_start');
+    const chipRoleStart = chipRoleStartEv?.payload as {
+      targetRole?: string;
+      mentions?: Array<{ role: string; label: string; start: number; end: number }>;
+    };
+    expect(chipRoleStartEv?.role).toBe('emma');
+    expect(chipRoleStart?.targetRole).toBe('emma');
+    expect(chipRoleStart?.mentions).toEqual([
+      {
+        role: 'emma',
+        label: '@Emma',
+        start: chipStart,
+        end: chipStart + '@Emma'.length,
+      },
+    ]);
+
+    // 3c. Explicit empty mentions array (UI literal '@' without selecting an agent chip) -> MUST still go through LLM router
+    llmCalls.length = 0;
+    const plainAtEvents = await collect(
+      workflow.iterate(project.id, '@Emma 把主色调改成深蓝色', {
+        model: 'mock-fast',
+        mentions: [],
+      })
+    );
+    expect(llmCalls[0]).toBe('router');
+    expect(
+      (
+        plainAtEvents.find((ev) => ev.type === 'intent_routed')?.payload as {
+          explicit?: boolean;
+          targetRole?: string;
+        }
+      )?.explicit
+    ).toBe(false);
+    expect(
+      (
+        plainAtEvents.find((ev) => ev.type === 'intent_routed')?.payload as {
+          targetRole?: string;
+        }
+      )?.targetRole
+    ).toBe('alex');
 
     // 4. Concrete modification instruction -> LLM router routes to Alex & updates code
     llmCalls.length = 0;

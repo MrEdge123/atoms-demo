@@ -14,9 +14,10 @@ import {
   Sparkles,
   Wrench,
 } from 'lucide-react';
-import type { AgentEvent, ProductPlan } from '@/domain';
+import type { AgentEvent, AgentMentionSpan, ProductPlan } from '@/domain';
 import type { ResearchOutput } from '@/core';
 import { AgentBadge } from './AtomsMark';
+import { RichMentionText } from './AgentMentionChip';
 
 interface FileWriteItem {
   path: string;
@@ -50,7 +51,13 @@ interface AgentReplyOption {
 }
 
 type TimelineItem =
-  | { kind: 'user_prompt'; key: string; text: string; timestamp: string }
+  | {
+      kind: 'user_prompt';
+      key: string;
+      text: string;
+      mentions?: AgentMentionSpan[];
+      timestamp: string;
+    }
   | {
       kind: 'iris_research';
       key: string;
@@ -114,10 +121,22 @@ function buildTimelineItems(events: AgentEvent[]): TimelineItem[] {
         payload.instruction.trim()
       ) {
         flushAlex();
+        const rawMentions = Array.isArray(payload.mentions)
+          ? (payload.mentions as AgentMentionSpan[]).filter(
+              (m) =>
+                m &&
+                (m.role === 'emma' || m.role === 'iris' || m.role === 'alex') &&
+                typeof m.label === 'string' &&
+                Number.isInteger(m.start) &&
+                Number.isInteger(m.end)
+            )
+          : undefined;
         items.push({
           kind: 'user_prompt',
           key: `iter-${ev.seq}-${i}`,
           text: payload.instruction,
+          mentions:
+            rawMentions && rawMentions.length > 0 ? rawMentions : undefined,
           timestamp: ev.timestamp,
         });
       }
@@ -701,8 +720,8 @@ export function TimelineStream({
                   minute: '2-digit',
                 })}
               </span>
-              <div className="max-w-[88%] rounded-2xl rounded-tr-sm bg-[#ebebea] px-3.5 py-2.5 text-xs text-[#0c0c0c]/90 leading-relaxed">
-                {item.text}
+              <div className="max-w-[88%] rounded-2xl rounded-tr-sm bg-[#ebebea] px-3.5 py-2.5 text-xs text-[#0c0c0c]/90 leading-relaxed whitespace-pre-wrap break-words">
+                <RichMentionText text={item.text} mentions={item.mentions} />
               </div>
             </div>
           );

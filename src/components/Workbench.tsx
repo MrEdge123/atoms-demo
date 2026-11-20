@@ -37,6 +37,7 @@ import {
 } from 'lucide-react';
 import type {
   AgentEvent,
+  AgentMentionSpan,
   CloudCapability,
   CompileError,
   DesignScenarioId,
@@ -66,8 +67,13 @@ import {
   ModelDropdown,
   StatusPill,
 } from './atoms/AtomsMark';
+import { RichMentionText } from './atoms/AgentMentionChip';
 import { GoodPathCard } from './atoms/GoodPathCard';
 import { LauncherView, type DemoIdeaPreset } from './atoms/LauncherView';
+import {
+  MentionComposerInput,
+  type ComposerValue,
+} from './atoms/MentionComposerInput';
 import { ProjectItemMenu } from './atoms/ProjectItemMenu';
 import { SharePublishPopover } from './atoms/SharePublishPopover';
 import { StyleThemeModal } from './atoms/StyleThemeModal';
@@ -205,12 +211,16 @@ export function Workbench() {
   const [composerMode, setComposerMode] = useState<'iterate' | 'restart'>(
     'restart'
   );
-  const [composerText, setComposerText] = useState('');
+  const [composerValue, setComposerValue] = useState<ComposerValue>({
+    text: '',
+    mentions: [],
+  });
   const [buildMode, setBuildMode] = useState<'linear' | 'race'>('linear');
   const [editablePlan, setEditablePlan] = useState<ProductPlan | null>(null);
   const [optimisticPrompt, setOptimisticPrompt] = useState<{
     projectId: string;
     text: string;
+    mentions?: AgentMentionSpan[];
     timestamp: string;
   } | null>(null);
   const [confirmedPlanExpanded, setConfirmedPlanExpanded] = useState(false);
@@ -611,7 +621,7 @@ export function Workbench() {
     setIsEditingCode(false);
     setCodeSaveBanner(null);
     setCodeCompileErrors([]);
-    setComposerText('');
+    setComposerValue({ text: '', mentions: [] });
     setOptimisticPrompt(null);
     setConfirmedPlanExpanded(false);
     setTargetAgent('auto');
@@ -666,7 +676,7 @@ export function Workbench() {
     setIsEditingCode(false);
     setCodeSaveBanner(null);
     setCodeCompileErrors([]);
-    setComposerText('');
+    setComposerValue({ text: '', mentions: [] });
     setOptimisticPrompt(null);
     setConfirmedPlanExpanded(false);
     setTargetAgent('auto');
@@ -695,7 +705,7 @@ export function Workbench() {
     if (!trimmed) return;
     const shouldClearComposer = Boolean(opts?.clearComposer);
     if (shouldClearComposer) {
-      setComposerText('');
+      setComposerValue({ text: '', mentions: [] });
     }
     setErrorMsg('');
     setRuntimeError('');
@@ -745,7 +755,7 @@ export function Workbench() {
       }
     } catch (err) {
       if (!sawRoleStart && shouldClearComposer && isCurrentProject()) {
-        setComposerText(trimmed);
+        setComposerValue({ text: trimmed, mentions: [] });
       }
       if (isCurrentProject()) {
         setErrorMsg(err instanceof Error ? err.message : String(err));
@@ -897,16 +907,36 @@ export function Workbench() {
     opts?: {
       clearComposer?: boolean;
       targetRole?: 'auto' | 'iris' | 'emma' | 'alex';
+      mentions?: AgentMentionSpan[];
     }
   ) {
-    const instruction = (customInstruction ?? composerText).trim();
+    const rawSource = customInstruction ?? composerValue.text;
+    const instruction = rawSource.trim();
     if (!activeId || !instruction || iterateBlockReason || busyAction) return;
+    const leadingTrim = rawSource.length - rawSource.trimStart().length;
+    const rawMentions =
+      customInstruction !== undefined
+        ? (opts?.mentions ?? [])
+        : composerValue.mentions;
+    const normalizedMentions: AgentMentionSpan[] = rawMentions
+      .map((m) => ({
+        ...m,
+        start: m.start - leadingTrim,
+        end: m.end - leadingTrim,
+      }))
+      .filter(
+        (m) => m.start >= 0 && m.end > m.start && m.end <= instruction.length
+      );
+
     const targetId = activeId;
     const resolvedTarget = opts?.targetRole ?? targetAgent;
+    const effectiveInitialRole =
+      normalizedMentions.length > 0 ? normalizedMentions[0].role : resolvedTarget;
     const shouldClearComposer =
       opts?.clearComposer ?? customInstruction === undefined;
+    const previousComposer = composerValue;
     if (shouldClearComposer) {
-      setComposerText('');
+      setComposerValue({ text: '', mentions: [] });
     }
     setErrorMsg('');
     setRuntimeError('');
@@ -914,20 +944,21 @@ export function Workbench() {
     setOptimisticPrompt({
       projectId: targetId,
       text: instruction,
+      mentions: normalizedMentions.length > 0 ? normalizedMentions : undefined,
       timestamp: new Date().toISOString(),
     });
     setBusyAction(
-      resolvedTarget === 'emma'
+      effectiveInitialRole === 'emma'
         ? 'Emma 正在梳理产品与视觉建议...'
-        : resolvedTarget === 'iris'
+        : effectiveInitialRole === 'iris'
           ? 'Iris 正在开展调研分析...'
-          : resolvedTarget === 'alex'
+          : effectiveInitialRole === 'alex'
             ? 'Alex 正在按指令迭代修改...'
             : '正在分析意图并分配智能体...'
     );
     let streamError = '';
     let sawRoleStart = false;
-    let routedToAlex = resolvedTarget === 'alex';
+    let routedToAlex = effectiveInitialRole === 'alex';
     const isCurrentProject = () =>
       !activeIdRef.current || activeIdRef.current === targetId;
     try {
@@ -938,6 +969,7 @@ export function Workbench() {
           instruction,
           model: selectedModel || undefined,
           targetRole: resolvedTarget,
+          mentions: normalizedMentions,
         }),
       });
       await readSseStream(res, (ev) => {
@@ -981,7 +1013,7 @@ export function Workbench() {
       }
     } catch (err) {
       if (!sawRoleStart && shouldClearComposer && isCurrentProject()) {
-        setComposerText(instruction);
+        setComposerValue(previousComposer);
       }
       if (isCurrentProject()) {
         setErrorMsg(err instanceof Error ? err.message : String(err));
@@ -1029,13 +1061,16 @@ export function Workbench() {
   }
 
   async function handleWorkspaceComposerSubmit() {
-    const text = composerText.trim();
+    const text = composerValue.text.trim();
     if (!text || busyAction) return;
 
     const activeComposerMode = hasDraft ? composerMode : 'restart';
     if (activeComposerMode === 'iterate') {
       if (isMutationLocked) return;
-      await handleIterate(text, { clearComposer: true });
+      await handleIterate(composerValue.text, {
+        clearComposer: true,
+        mentions: composerValue.mentions,
+      });
       return;
     }
 
@@ -1268,7 +1303,7 @@ export function Workbench() {
   const composerLocked =
     Boolean(busyAction) ||
     (effectiveComposerMode === 'iterate' && isMutationLocked);
-  const canSubmitComposer = Boolean(composerText.trim()) && !composerLocked;
+  const canSubmitComposer = Boolean(composerValue.text.trim()) && !composerLocked;
   const codeLines =
     selectedFile && draftFiles[selectedFile]
       ? draftFiles[selectedFile].split('\n')
@@ -2073,7 +2108,10 @@ export function Workbench() {
             {optimisticPrompt && optimisticPrompt.projectId === activeId && (
               <div className="flex flex-col items-end space-y-1">
                 <div className="max-w-[90%] rounded-2xl rounded-tr-sm bg-[#ebebea] px-3.5 py-2.5 text-xs text-[#0c0c0c]/90 leading-relaxed whitespace-pre-wrap break-words">
-                  {optimisticPrompt.text}
+                  <RichMentionText
+                    text={optimisticPrompt.text}
+                    mentions={optimisticPrompt.mentions}
+                  />
                 </div>
               </div>
             )}
@@ -2099,7 +2137,9 @@ export function Workbench() {
                       key={chip}
                       type="button"
                       disabled={isMutationLocked || Boolean(busyAction)}
-                      onClick={() => setComposerText(chip)}
+                      onClick={() =>
+                        setComposerValue({ text: chip, mentions: [] })
+                      }
                       className="rounded-full border border-black/[0.08] bg-white px-2.5 py-1 text-[11px] font-medium text-[#0c0c0c]/75 hover:border-[#4267ff]/40 hover:text-[#4267ff] transition disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
                     >
                       + {chip}
@@ -2158,19 +2198,13 @@ export function Workbench() {
               )}
 
               <div className="p-3 space-y-2.5">
-                <textarea
-                  rows={2}
+                <MentionComposerInput
+                  value={composerValue}
+                  onChange={setComposerValue}
+                  onSubmit={() => void handleWorkspaceComposerSubmit()}
+                  enableMentions={effectiveComposerMode === 'iterate'}
                   disabled={composerLocked}
-                  value={composerText}
-                  onChange={(e) => setComposerText(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault();
-                      if (canSubmitComposer) {
-                        void handleWorkspaceComposerSubmit();
-                      }
-                    }
-                  }}
+                  onMentionPick={() => setTargetAgent('auto')}
                   placeholder={
                     effectiveComposerMode === 'restart'
                       ? '输入新的产品想法（将启动 Iris 调研 → Emma 方案确认）...'
@@ -2188,9 +2222,8 @@ export function Workbench() {
                                 ? '向 Iris 提问市场需求、竞品做法或用户留存建议...'
                                 : targetAgent === 'alex'
                                   ? '直接向 Alex 下达具体改代码指令（不影响已发布线上版本）...'
-                                  : '输入想法讨论或具体修改需求（自动判断交由 Iris 调研 / Emma 讨论 / Alex 改代码）...'
+                                  : '输入想法或修改需求（默认智能路由，输入 @ 可在任意位置指定智能体）...'
                   }
-                  className="w-full resize-none bg-transparent text-xs leading-relaxed text-[#0c0c0c]/95 placeholder:text-[#0c0c0c]/35 focus:outline-none disabled:opacity-50"
                 />
 
                 <div className="flex items-center justify-between gap-2 pt-0.5">

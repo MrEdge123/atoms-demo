@@ -4,6 +4,17 @@
 export type AgentRole = 'iris' | 'emma' | 'alex' | 'system';
 
 /**
+ * Structured inline @mention span created when the user picks an agent from
+ * the composer mention selector (distinct from plain literal `@` characters).
+ */
+export interface AgentMentionSpan {
+  role: 'iris' | 'emma' | 'alex';
+  label: string;
+  start: number;
+  end: number;
+}
+
+/**
  * Event types emitted over SSE and persisted in the project event log.
  */
 export type AgentEventType =

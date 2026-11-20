@@ -1,5 +1,6 @@
 import type {
   AgentEvent,
+  AgentMentionSpan,
   AgentRole,
   BuildArtifact,
   ProductPlan,
@@ -64,26 +65,85 @@ function formatLogLabel(value: unknown, fallback = 'default'): string {
   return typeof value === 'string' && value.trim() ? value.trim() : fallback;
 }
 
+function normalizeMentionSpans(
+  rawMentions: AgentMentionSpan[],
+  trimmedText: string,
+  leadingTrim: number
+): AgentMentionSpan[] {
+  const candidates: AgentMentionSpan[] = [];
+  for (const item of rawMentions) {
+    if (!item || typeof item !== 'object') continue;
+    const role = item.role;
+    const label = typeof item.label === 'string' ? item.label.trim() : '';
+    if (
+      (role !== 'iris' && role !== 'emma' && role !== 'alex') ||
+      !label ||
+      !Number.isInteger(item.start) ||
+      !Number.isInteger(item.end)
+    ) {
+      continue;
+    }
+    const start = item.start - leadingTrim;
+    const end = item.end - leadingTrim;
+    if (start >= 0 && end > start && end <= trimmedText.length) {
+      candidates.push({ role, label, start, end });
+    }
+  }
+  candidates.sort((a, b) => a.start - b.start);
+  const nonOverlapping: AgentMentionSpan[] = [];
+  let cursor = 0;
+  for (const span of candidates) {
+    if (span.start < cursor) continue;
+    nonOverlapping.push(span);
+    cursor = span.end;
+    if (nonOverlapping.length >= 10) break;
+  }
+  return nonOverlapping;
+}
+
+function stripMentionSpans(text: string, spans: AgentMentionSpan[]): string {
+  if (spans.length === 0) return text;
+  let result = '';
+  let cursor = 0;
+  for (const span of spans) {
+    result += text.slice(cursor, span.start);
+    cursor = span.end;
+  }
+  result += text.slice(cursor);
+  return result.replace(/^[\s:：,，-]+/, '').replace(/\s{2,}/g, ' ').trim() || text;
+}
+
 function parseExplicitMention(raw: string): {
   role: 'iris' | 'emma' | 'alex' | null;
   cleanedText: string;
+  span?: AgentMentionSpan;
 } {
   const trimmed = raw.trim();
   const match = trimmed.match(
-    /^@(iris|emma|alex|产品经理|产品|调研员|调研|全栈工程师|全栈|开发)(?:[\s:：,，-]+(.*)|$)/is
+    /(^|\s)@(iris|emma|alex|产品经理|产品|调研员|调研|全栈工程师|全栈|开发)(?=$|[\s:：,，。.!?！？-])/i
   );
-  if (!match) {
+  if (!match || match.index === undefined) {
     return { role: null, cleanedText: trimmed };
   }
-  const token = match[1].toLowerCase();
-  const rest = (match[2] ?? '').trim() || trimmed;
-  if (token === 'iris' || token.startsWith('调研')) {
-    return { role: 'iris', cleanedText: rest };
-  }
-  if (token === 'emma' || token.startsWith('产品')) {
-    return { role: 'emma', cleanedText: rest };
-  }
-  return { role: 'alex', cleanedText: rest };
+  const token = match[2].toLowerCase();
+  const tokenStart = match.index + match[1].length;
+  const tokenEnd = match.index + match[0].length;
+  const label = trimmed.slice(tokenStart, tokenEnd);
+  const afterToken = trimmed.slice(tokenEnd).replace(/^[\s:：,，-]+/, ' ');
+  const cleanedText =
+    `${trimmed.slice(0, tokenStart)}${afterToken}`.replace(/\s{2,}/g, ' ').trim() ||
+    trimmed;
+  const role: 'iris' | 'emma' | 'alex' =
+    token === 'iris' || token.startsWith('调研')
+      ? 'iris'
+      : token === 'emma' || token.startsWith('产品')
+        ? 'emma'
+        : 'alex';
+  return {
+    role,
+    cleanedText,
+    span: { role, label, start: tokenStart, end: tokenEnd },
+  };
 }
 
 function formatRecentConversationContext(events: AgentEvent[]): string {
@@ -656,6 +716,7 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
     opts?: {
       model?: string;
       targetRole?: 'auto' | 'iris' | 'emma' | 'alex';
+      mentions?: AgentMentionSpan[];
       signal?: AbortSignal;
     }
   ): AsyncIterable<AgentEvent> {
@@ -680,6 +741,7 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
         throw new Error(`Project "${projectId}" has no draft files to iterate on`);
       }
 
+      const leadingTrim = instruction.length - instruction.trimStart().length;
       const rawInstruction = instruction.trim();
       const previousStatus = project.status;
       restoreStatus =
@@ -696,7 +758,13 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
       };
       const recentContext = formatRecentConversationContext(existingEvents);
 
-      const mention = parseExplicitMention(rawInstruction);
+      const hasExplicitMentionsParam = opts?.mentions !== undefined;
+      const structuredMentions = hasExplicitMentionsParam
+        ? normalizeMentionSpans(opts!.mentions!, rawInstruction, leadingTrim)
+        : [];
+      const fallbackMention = hasExplicitMentionsParam
+        ? { role: null as 'iris' | 'emma' | 'alex' | null, cleanedText: rawInstruction, span: undefined }
+        : parseExplicitMention(rawInstruction);
       const explicitArgRole =
         opts?.targetRole && opts.targetRole !== 'auto' ? opts.targetRole : null;
 
@@ -707,9 +775,39 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
         explicit: boolean;
       };
       let cleanInstruction = rawInstruction;
+      let persistedMentions: AgentMentionSpan[] = [];
 
-      if (explicitArgRole) {
-        cleanInstruction = mention.role ? mention.cleanedText : rawInstruction;
+      if (structuredMentions.length > 0) {
+        const primaryRole = structuredMentions[0].role;
+        cleanInstruction = stripMentionSpans(rawInstruction, structuredMentions);
+        persistedMentions = structuredMentions;
+        routed = {
+          targetRole: primaryRole,
+          intent:
+            primaryRole === 'iris'
+              ? 'research'
+              : primaryRole === 'emma'
+                ? 'discuss'
+                : 'implement',
+          reason: `用户通过 @ 提及指定 ${primaryRole}`,
+          explicit: true,
+        };
+      } else if (fallbackMention.role) {
+        cleanInstruction = fallbackMention.cleanedText;
+        persistedMentions = fallbackMention.span ? [fallbackMention.span] : [];
+        routed = {
+          targetRole: fallbackMention.role,
+          intent:
+            fallbackMention.role === 'iris'
+              ? 'research'
+              : fallbackMention.role === 'emma'
+                ? 'discuss'
+                : 'implement',
+          reason: `用户通过 @ 提及指定 ${fallbackMention.role}`,
+          explicit: true,
+        };
+      } else if (explicitArgRole) {
+        cleanInstruction = rawInstruction;
         routed = {
           targetRole: explicitArgRole,
           intent:
@@ -719,19 +817,6 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
                 ? 'discuss'
                 : 'implement',
           reason: '用户已手动指定协作智能体',
-          explicit: true,
-        };
-      } else if (mention.role) {
-        cleanInstruction = mention.cleanedText;
-        routed = {
-          targetRole: mention.role,
-          intent:
-            mention.role === 'iris'
-              ? 'research'
-              : mention.role === 'emma'
-                ? 'discuss'
-                : 'implement',
-          reason: `用户通过 @ 提及指定 ${mention.role}`,
           explicit: true,
         };
       } else {
@@ -776,7 +861,7 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
       }
 
       console.log(
-        `[Workflow] iterate routed project=${projectId} role=${routed.targetRole} intent=${routed.intent} explicit=${routed.explicit} model=${modelLabel}`
+        `[Workflow] iterate routed project=${projectId} role=${routed.targetRole} intent=${routed.intent} explicit=${routed.explicit} mentions=${persistedMentions.length} model=${modelLabel}`
       );
 
       const startLabel =
@@ -792,6 +877,9 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
         payload: {
           label: startLabel,
           instruction: rawInstruction,
+          ...(persistedMentions.length > 0
+            ? { mentions: persistedMentions }
+            : {}),
           targetRole: routed.targetRole,
           intent: routed.intent,
           routeReason: routed.reason,
