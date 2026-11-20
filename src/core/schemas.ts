@@ -14,6 +14,19 @@ export const researchOutputSchema = z.object({
 
 export type ResearchOutput = z.infer<typeof researchOutputSchema>;
 
+const hexColorSchema = z
+  .string()
+  .trim()
+  .regex(/^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/, 'Invalid hex color');
+
+const strictStylePaletteSchema = z.object({
+  background: hexColorSchema,
+  surface: hexColorSchema,
+  textPrimary: hexColorSchema,
+  textMuted: hexColorSchema,
+  accent: hexColorSchema,
+});
+
 const stylePaletteSchema = z.object({
   background: z.string().min(1).max(40),
   surface: z.string().min(1).max(40),
@@ -43,7 +56,7 @@ export const styleThemeSchema = z.object({
   description: z.string().max(240).optional(),
   scenario: designScenarioIdSchema.optional(),
   colorMode: z.enum(['light', 'dark']),
-  palette: stylePaletteSchema,
+  palette: strictStylePaletteSchema,
   typography: styleTypographySchema,
   radiusStyle: z.enum(['sharp', 'soft', 'pill']).optional(),
   surfaceDepth: z

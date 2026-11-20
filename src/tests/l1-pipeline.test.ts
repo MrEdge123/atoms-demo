@@ -703,4 +703,200 @@ export default function App() {
 
     await c.close();
   }, 15000);
+
+  it('prevents role name collisions and applies confirmed themes, Race Mode tokens, and CSS cascade layers', async () => {
+    const {
+      BUILTIN_STYLE_THEMES,
+      applyThemeToDesignSystem,
+      createUnthemedDesignSystem,
+      isPendingPlanConfirmation,
+      styleThemeSchema,
+    } = await import('@/core');
+
+    const c = await createContainer({
+      storageAdapter: 'memory',
+      llmAdapter: 'mock',
+      builderAdapter: 'esbuild',
+    });
+
+    try {
+      // (a) Role collision regression: theme "Iris Studio" + project "Emma Studio"
+      const collisionTheme = {
+        id: 'custom-iris-studio',
+        name: 'Iris Studio',
+        description: 'Warm editorial test theme named Iris Studio',
+        scenario: 'B' as const,
+        colorMode: 'light' as const,
+        palette: {
+          background: '#FAF9F6',
+          surface: '#FFFFFF',
+          textPrimary: '#1A1816',
+          textMuted: '#6C665E',
+          accent: '#8B4A2B',
+        },
+        typography: {
+          headingStyle: 'editorial-serif' as const,
+          bodyStyle: 'sans' as const,
+        },
+        stylePrompt: 'Warm gallery layout with editorial serif headings',
+        builtIn: false,
+      };
+      const pCollision = await c.repo.create({
+        title: 'Emma Studio',
+        slug: 'emma-studio-collision',
+      });
+      for await (const _ of c.workflow.start(
+        pCollision.id,
+        'Build an atelier portfolio for Emma Studio',
+        { styleTheme: collisionTheme }
+      )) {
+        // drain SSE events
+      }
+      const afterStart = await c.repo.getById(pCollision.id);
+      expect(afterStart).not.toBeNull();
+      expect(isPendingPlanConfirmation(afterStart!)).toBe(true);
+      expect(afterStart?.plan?.designSystem?.themeName).toBe('Iris Studio');
+
+      for await (const _ of c.workflow.confirmPlan(pCollision.id, {
+        mode: 'linear',
+      })) {
+        // drain SSE events
+      }
+      const afterConfirm = await c.repo.getById(pCollision.id);
+      expect(afterConfirm).not.toBeNull();
+      expect(isPendingPlanConfirmation(afterConfirm!)).toBe(false);
+      expect(afterConfirm?.draftFiles['DESIGN.md']).toContain('Iris Studio');
+      expect(afterConfirm?.draftFiles['src/App.tsx']).toContain('bg-[#FAF9F6]');
+
+      // (b) Obsidian tech dark palette in linear mode & contrasting Race Mode branches
+      const obsidianTheme = BUILTIN_STYLE_THEMES.find(
+        (t) => t.id === 'preset-obsidian-tech'
+      );
+      expect(obsidianTheme).toBeDefined();
+
+      const pObsLinear = await c.repo.create({
+        title: 'Obsidian Linear App',
+        slug: 'obsidian-linear-app',
+      });
+      for await (const _ of c.workflow.start(
+        pObsLinear.id,
+        'Build a dark AI telemetry product landing page',
+        { styleTheme: obsidianTheme! }
+      )) {
+        // drain
+      }
+      for await (const _ of c.workflow.confirmPlan(pObsLinear.id, {
+        mode: 'linear',
+      })) {
+        // drain
+      }
+      const obsLinear = await c.repo.getById(pObsLinear.id);
+      expect(obsLinear?.draftFiles['src/App.tsx']).toContain(
+        'data-color-mode="dark"'
+      );
+      expect(obsLinear?.draftFiles['src/App.tsx']).toContain('bg-[#0A0B10]');
+
+      const pObsRace = await c.repo.create({
+        title: 'Obsidian Race App',
+        slug: 'obsidian-race-app',
+      });
+      for await (const _ of c.workflow.start(
+        pObsRace.id,
+        'Build an AI telemetry workspace with dual style branches',
+        { styleTheme: obsidianTheme! }
+      )) {
+        // drain
+      }
+      for await (const _ of c.workflow.confirmPlan(pObsRace.id, {
+        mode: 'race',
+      })) {
+        // drain
+      }
+      const obsRace = await c.repo.getById(pObsRace.id);
+      const branchA = obsRace?.raceBranches.find(
+        (b) => b.branchId === 'branch-a'
+      );
+      const branchB = obsRace?.raceBranches.find(
+        (b) => b.branchId === 'branch-b'
+      );
+      expect(branchA?.designSystem?.colorMode).toBe('dark');
+      expect(branchA?.files['src/App.tsx']).toContain('bg-[#0A0B10]');
+      expect(branchB?.designSystem?.colorMode).toBe('light');
+      expect(branchB?.files['DESIGN.md']).toContain('#F8F9FB');
+      expect(branchB?.files['src/App.tsx']).toContain('data-color-mode="light"');
+      expect(branchB?.files['src/App.tsx']).toContain('bg-[#F8F9FB]');
+
+      const selectedBranch = await c.workflow.selectBranch(
+        pObsRace.id,
+        'branch-b'
+      );
+      expect(selectedBranch.plan?.designSystem?.colorMode).toBe('light');
+      expect(selectedBranch.plan?.designSystem?.palette.background).toBe(
+        '#F8F9FB'
+      );
+
+      // (c) Theme application scenario rebase (B -> D), null restore, and hex validation
+      const baselineB = createUnthemedDesignSystem('B');
+      const themeD = BUILTIN_STYLE_THEMES.find((t) => t.scenario === 'D');
+      expect(themeD).toBeDefined();
+      const rebasedD = applyThemeToDesignSystem(
+        baselineB,
+        themeD!,
+        baselineB
+      );
+      expect(rebasedD?.scenario).toBe('D');
+      expect(rebasedD?.layoutBlueprint).not.toBe(baselineB.layoutBlueprint);
+      expect(rebasedD?.mediaStrategy).not.toBe(baselineB.mediaStrategy);
+
+      const restoredB = applyThemeToDesignSystem(rebasedD, null, baselineB);
+      expect(restoredB?.scenario).toBe('B');
+      expect(restoredB?.themeId).toBeUndefined();
+      expect(restoredB?.layoutBlueprint).toBe(baselineB.layoutBlueprint);
+
+      const badHex = styleThemeSchema.safeParse({
+        ...themeD!,
+        palette: { ...themeD!.palette, background: '#GGGGGG' },
+      });
+      expect(badHex.success).toBe(false);
+
+      // (d) EsbuildStaticBuilder CSS cascade layers & responsive font stack
+      const baseFiles = {
+        ...afterConfirm!.draftFiles,
+        'src/App.tsx': `import React from 'react';
+export default function App() {
+  return (
+    <main className="min-h-screen bg-[#FAF9F6] text-[#1A1816]">
+      <h1 className="font-editorial md:font-sans font-serif text-[clamp(1.25rem,3vw,2.5rem)]">
+        Cascade Layer Check
+      </h1>
+    </main>
+  );
+}`,
+      };
+      const compiledCssCheck = await c.builder.compile({
+        files: baseFiles,
+        projectId: pCollision.id,
+        apiBaseUrl: 'http://localhost:3000',
+        capabilities: [],
+        mode: 'preview',
+      });
+      expect(compiledCssCheck.ok).toBe(true);
+      if (compiledCssCheck.ok) {
+        const styleSection = compiledCssCheck.html.slice(
+          compiledCssCheck.html.indexOf('<style>'),
+          compiledCssCheck.html.indexOf('</style>')
+        );
+        expect(styleSection).toMatch(/overflow-x:\s*clip/);
+        expect(styleSection).not.toMatch(/overflow-x:\s*hidden/);
+        const layerCompIdx = styleSection.indexOf('@layer components');
+        const editorialIdx = styleSection.indexOf('.font-editorial');
+        const mdSansIdx = styleSection.indexOf('.md\\:font-sans');
+        expect(layerCompIdx).toBeGreaterThanOrEqual(0);
+        expect(editorialIdx).toBeGreaterThan(layerCompIdx);
+        expect(mdSansIdx).toBeGreaterThan(editorialIdx);
+      }
+    } finally {
+      await c.close();
+    }
+  }, 20000);
 });

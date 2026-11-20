@@ -25,19 +25,27 @@ function getTailwindCompiler(): Promise<TailwindCompiler> {
     cachedTailwindCompiler = (async () => {
       const twBase = path.resolve(process.cwd(), 'node_modules/tailwindcss');
       const indexCssPath = path.join(twBase, 'index.css');
-      return compileTailwind('@import "tailwindcss";', {
-        loadStylesheet: async (id, base) => {
-          const target =
-            id === 'tailwindcss'
-              ? indexCssPath
-              : path.resolve(base || twBase, id);
-          return {
-            path: target,
-            base: path.dirname(target),
-            content: fs.readFileSync(target, 'utf8'),
-          };
-        },
-      });
+      return compileTailwind(
+        `@import "tailwindcss";
+@theme {
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "Source Han Serif SC", "Noto Serif SC", "Songti SC", "STZhongsong", "Playfair Display", Georgia, serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}`,
+        {
+          loadStylesheet: async (id, base) => {
+            const target =
+              id === 'tailwindcss'
+                ? indexCssPath
+                : path.resolve(base || twBase, id);
+            return {
+              path: target,
+              base: path.dirname(target),
+              content: fs.readFileSync(target, 'utf8'),
+            };
+          },
+        }
+      );
     })();
   }
   return cachedTailwindCompiler;
@@ -84,22 +92,24 @@ function extractTailwindCandidates(sources: string[]): string[] {
 }
 
 const DESIGN_BASE_CSS = `
-html, body {
-  margin: 0;
-  overflow-x: hidden;
-  scroll-behavior: smooth;
+@layer base {
+  html, body {
+    margin: 0;
+    overflow-x: clip;
+    scroll-behavior: smooth;
+    font-family: var(--font-sans, "Inter", -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif);
+  }
 }
-.font-editorial, .font-serif {
-  font-family: "Source Han Serif SC", "Noto Serif SC", "Songti SC", "STZhongsong", "Playfair Display", Georgia, serif;
-}
-.font-display, .font-sans {
-  font-family: "Inter", -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", ui-sans-serif, system-ui, sans-serif;
-}
-.font-mono {
-  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-}
-.tabular-nums {
-  font-variant-numeric: tabular-nums;
+@layer components {
+  .font-editorial {
+    font-family: var(--font-serif, "Source Han Serif SC", "Noto Serif SC", "Songti SC", Georgia, serif);
+  }
+  .font-display {
+    font-family: var(--font-sans, "Inter", -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif);
+  }
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
 }
 @keyframes atomsFadeUp {
   from {

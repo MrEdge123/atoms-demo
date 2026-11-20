@@ -225,6 +225,10 @@ export function Workbench() {
   const listVersionRef = useRef(0);
   const hasAcceptedSnapshotRef = useRef(false);
   const modelsLoadedRef = useRef(false);
+  const planBaselineDsRef = useRef<{
+    projectId: string;
+    ds: NonNullable<ProductPlan['designSystem']>;
+  } | null>(null);
 
   useEffect(() => {
     activeIdRef.current = activeId;
@@ -236,11 +240,20 @@ export function Workbench() {
       if (!raw) return;
       const parsedJson = JSON.parse(raw);
       if (!Array.isArray(parsedJson)) return;
+      const reservedIds = new Set([
+        'auto',
+        ...BUILTIN_STYLE_THEMES.map((t) => t.id),
+      ]);
       const valid: StyleThemeSpec[] = [];
-      for (const item of parsedJson) {
-        const res = styleThemeSchema.safeParse(item);
+      for (let i = 0; i < parsedJson.length; i += 1) {
+        const res = styleThemeSchema.safeParse(parsedJson[i]);
         if (res.success) {
-          valid.push({ ...res.data, isCustom: true });
+          let id = res.data.id;
+          if (reservedIds.has(id)) {
+            id = `custom-local-${Date.now().toString(36)}-${i}`;
+          }
+          reservedIds.add(id);
+          valid.push({ ...res.data, id, isCustom: true });
         }
       }
       setCustomThemes(valid);
@@ -272,7 +285,15 @@ export function Workbench() {
   }
 
   function handleSaveCustomTheme(theme: StyleThemeSpec) {
-    const next = [theme, ...customThemes.filter((t) => t.id !== theme.id)];
+    const reserved = new Set([
+      'auto',
+      ...BUILTIN_STYLE_THEMES.map((t) => t.id),
+    ]);
+    const safeId = reserved.has(theme.id)
+      ? `custom-${Date.now().toString(36)}`
+      : theme.id;
+    const normalized: StyleThemeSpec = { ...theme, id: safeId, isCustom: true };
+    const next = [normalized, ...customThemes.filter((t) => t.id !== safeId)];
     persistCustomThemes(next);
   }
 
@@ -285,19 +306,36 @@ export function Workbench() {
   }
 
   function handleImportCustomThemes(imported: StyleThemeSpec[]) {
-    const existingIds = new Set(customThemes.map((t) => t.id));
-    const deduped = [
-      ...imported.filter((t) => !existingIds.has(t.id)),
-      ...customThemes,
-    ];
-    persistCustomThemes(deduped);
+    const usedIds = new Set([
+      'auto',
+      ...BUILTIN_STYLE_THEMES.map((t) => t.id),
+      ...customThemes.map((t) => t.id),
+    ]);
+    const accepted: StyleThemeSpec[] = [];
+    imported.forEach((item, idx) => {
+      let safeId = item.id.trim();
+      if (!safeId || usedIds.has(safeId)) {
+        safeId = `custom-import-${Date.now().toString(36)}-${idx}`;
+      }
+      usedIds.add(safeId);
+      accepted.push({ ...item, id: safeId, isCustom: true });
+    });
+    persistCustomThemes([...accepted, ...customThemes]);
   }
 
   function handleApplyThemeSelection(theme: StyleThemeSpec | null) {
     if (themeModalMode === 'emma' && editablePlan) {
+      const baseline =
+        activeId && planBaselineDsRef.current?.projectId === activeId
+          ? planBaselineDsRef.current.ds
+          : null;
       setEditablePlan({
         ...editablePlan,
-        designSystem: applyThemeToDesignSystem(editablePlan.designSystem, theme),
+        designSystem: applyThemeToDesignSystem(
+          editablePlan.designSystem,
+          theme,
+          baseline
+        ),
       });
       return;
     }
@@ -346,6 +384,15 @@ export function Workbench() {
       setSnapshot(data);
       setEvents(data.events);
       setEditablePlan(data.project.plan);
+      if (
+        data.project.plan?.designSystem &&
+        !data.project.plan.designSystem.themeId
+      ) {
+        planBaselineDsRef.current = {
+          projectId: data.project.id,
+          ds: data.project.plan.designSystem,
+        };
+      }
       if (!hasAcceptedSnapshotRef.current) {
         hasAcceptedSnapshotRef.current = true;
         const draftCount = Object.keys(data.project.draftFiles).length;

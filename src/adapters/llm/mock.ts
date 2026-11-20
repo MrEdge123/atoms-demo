@@ -130,23 +130,65 @@ function buildMockReactFiles(opts: {
   darkTheme: boolean;
   deepBlueAccent: boolean;
   includeCsvButton: boolean;
+  palette?: {
+    background: string;
+    surface: string;
+    textPrimary: string;
+    textMuted: string;
+    accent: string;
+  };
+  headingStyle?: 'editorial-serif' | 'geometric-sans' | 'minimal-sans';
 }): AlexFilesOutput {
-  const bgClass = opts.darkTheme
+  const customBg = opts.palette?.background;
+  const customSurface = opts.palette?.surface;
+  const customText = opts.palette?.textPrimary;
+  const customMuted = opts.palette?.textMuted;
+  const customAccent = opts.palette?.accent;
+
+  const useLegacyDark = opts.darkTheme && (!customBg || customBg.toLowerCase() === '#020617');
+  const useLegacyLight = !opts.darkTheme && (!customBg || customBg.toLowerCase() === '#f7f7f5');
+
+  const bgClass = useLegacyDark
     ? 'min-h-screen bg-slate-950 text-slate-100'
-    : 'min-h-screen bg-slate-50 text-slate-900';
-  const cardClass = opts.darkTheme
+    : useLegacyLight
+      ? 'min-h-screen bg-slate-50 text-slate-900'
+      : customBg
+        ? `min-h-screen bg-[${customBg}] text-[${customText ?? (opts.darkTheme ? '#F3F4F6' : '#141413')}]`
+        : opts.darkTheme
+          ? 'min-h-screen bg-slate-950 text-slate-100'
+          : 'min-h-screen bg-slate-50 text-slate-900';
+
+  const cardClass = useLegacyDark
     ? 'rounded-2xl border border-slate-800 bg-slate-900/90 shadow-lg'
-    : 'rounded-2xl border border-slate-200 bg-white shadow-sm';
+    : useLegacyLight
+      ? 'rounded-2xl border border-slate-200 bg-white shadow-sm'
+      : customSurface
+        ? opts.darkTheme
+          ? `rounded-2xl border border-[rgba(255,255,255,0.08)] bg-[${customSurface}]`
+          : `rounded-2xl border border-[rgba(12,12,12,0.08)] bg-[${customSurface}]`
+        : opts.darkTheme
+          ? 'rounded-2xl border border-slate-800 bg-slate-900/90 shadow-lg'
+          : 'rounded-2xl border border-slate-200 bg-white shadow-sm';
+
   const inputClass = opts.darkTheme
     ? 'w-full rounded-xl border border-slate-700 bg-slate-950 px-3.5 py-2.5 text-sm text-slate-100 placeholder-slate-500 focus:border-cyan-400 focus:outline-none'
     : 'w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900 placeholder-slate-400 focus:border-indigo-500 focus:bg-white focus:outline-none';
   const primaryBtn = opts.deepBlueAccent
     ? 'inline-flex items-center justify-center gap-1.5 rounded-xl bg-blue-800 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-900 transition disabled:opacity-50'
-    : opts.darkTheme
-      ? 'inline-flex items-center justify-center gap-1.5 rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-emerald-400 transition disabled:opacity-50'
-      : 'inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-indigo-700 transition disabled:opacity-50';
-  const mutedText = opts.darkTheme ? 'text-slate-400' : 'text-slate-500';
+    : customAccent && !useLegacyDark && !useLegacyLight
+      ? `inline-flex items-center justify-center gap-1.5 rounded-full bg-[${customAccent}] px-4 py-2.5 text-sm font-semibold text-white hover:opacity-90 transition disabled:opacity-50`
+      : opts.darkTheme
+        ? 'inline-flex items-center justify-center gap-1.5 rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-slate-950 hover:bg-emerald-400 transition disabled:opacity-50'
+        : 'inline-flex items-center justify-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-indigo-700 transition disabled:opacity-50';
+  const mutedText =
+    customMuted && !useLegacyDark && !useLegacyLight
+      ? `text-[${customMuted}]`
+      : opts.darkTheme
+        ? 'text-slate-400'
+        : 'text-slate-500';
   const rowBorder = opts.darkTheme ? 'border-slate-800' : 'border-slate-100';
+  const headingFontClass =
+    opts.headingStyle === 'editorial-serif' ? 'font-editorial ' : '';
 
   const authCardTsx = `import React, { useState } from 'react';
 import { auth, type CloudUser } from '@atoms/cloud';
@@ -419,7 +461,7 @@ export default function App() {
   const canExportCsv = ${opts.includeCsvButton ? 'true' : "user?.plan === 'pro'"};
 
   return (
-    <div className="${bgClass}">
+    <div className="${bgClass}" data-color-mode="${opts.darkTheme ? 'dark' : 'light'}">
       <div className="max-w-4xl mx-auto px-4 py-8 space-y-6">
         <header className="flex flex-wrap items-start justify-between gap-4">
           <div className="space-y-1.5">
@@ -427,7 +469,7 @@ export default function App() {
               <Sparkles className="w-3.5 h-3.5" />
               Powered by @atoms/cloud
             </div>
-            <h1 className="text-2xl sm:text-3xl font-bold tracking-tight">${opts.appName}</h1>
+            <h1 className="${headingFontClass}text-2xl sm:text-3xl font-bold tracking-tight">${opts.appName}</h1>
             <p className="text-sm ${mutedText}">${opts.summary}</p>
           </div>
           <div className="flex items-center gap-2">
@@ -611,12 +653,12 @@ export class MockLLMProvider implements LLMProvider {
     schema: SchemaLike<T>;
     model?: string;
   }): Promise<T> {
-    if (input.system.includes('Iris')) {
+    if (input.system.startsWith('You are Iris,')) {
       const idea =
         extractSection(
           input.prompt,
           'User Idea:',
-          '\n\nProduce a focused market'
+          '\n\nProduce a focused'
         ) || input.prompt;
       const template = inferDomainTemplate(idea);
       const output = {
@@ -637,7 +679,7 @@ export class MockLLMProvider implements LLMProvider {
       return input.schema.parse(output);
     }
 
-    if (input.system.includes('Emma')) {
+    if (input.system.startsWith('You are Emma,')) {
       const idea =
         extractSection(
           input.prompt,
@@ -755,11 +797,16 @@ export class MockLLMProvider implements LLMProvider {
         )
       : '';
 
-    const existingDarkTheme = existingAppTsx.includes('bg-slate-950');
+    const existingDarkTheme =
+      existingAppTsx.includes('bg-slate-950') ||
+      existingAppTsx.includes('data-color-mode="dark"');
     const existingDeepBlue = existingAppTsx.includes('bg-blue-800');
     const existingCsvAlwaysVisible = existingAppTsx.includes(
       'const canExportCsv = true'
     );
+    const planDarkTheme = plan?.designSystem
+      ? plan.designSystem.colorMode === 'dark'
+      : undefined;
 
     let darkTheme: boolean;
     let deepBlueAccent: boolean;
@@ -793,14 +840,21 @@ export class MockLLMProvider implements LLMProvider {
           ? true
           : existingCsvAlwaysVisible;
     } else if (isFix) {
-      darkTheme = existingDarkTheme || isBranchB;
+      darkTheme = existingDarkTheme || (planDarkTheme ?? isBranchB);
       deepBlueAccent = existingDeepBlue;
       includeCsvButton = existingCsvAlwaysVisible;
     } else {
-      darkTheme = isBranchB;
+      darkTheme = planDarkTheme ?? isBranchB;
       deepBlueAccent = false;
       includeCsvButton = false;
     }
+
+    const effectivePalette =
+      !deepBlueAccent &&
+      plan?.designSystem &&
+      (plan.designSystem.colorMode === 'dark') === darkTheme
+        ? plan.designSystem.palette
+        : undefined;
 
     const files = buildMockReactFiles({
       appName,
@@ -810,6 +864,8 @@ export class MockLLMProvider implements LLMProvider {
       darkTheme,
       deepBlueAccent,
       includeCsvButton,
+      palette: effectivePalette,
+      headingStyle: plan?.designSystem?.typography?.headingStyle,
     });
 
     return input.schema.parse(files);

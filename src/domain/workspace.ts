@@ -108,6 +108,7 @@ export interface RaceBranch {
   branchId: string;
   label: string;
   styleDirection: string;
+  designSystem?: DesignSystemSpec;
   files: VirtualFS;
   previewHtml: string | null;
   errors: CompileError[];

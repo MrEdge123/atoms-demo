@@ -9,6 +9,10 @@ export interface RaceStyleDirection {
   branchId: string;
   label: string;
   styleDirection: string;
+  colorMode: 'light' | 'dark';
+  palette: DesignSystemSpec['palette'];
+  surfaceDepth: NonNullable<DesignSystemSpec['surfaceDepth']>;
+  radiusStyle?: NonNullable<DesignSystemSpec['radiusStyle']>;
 }
 
 export interface DesignScenarioDefinition {
@@ -70,12 +74,32 @@ export const DESIGN_SCENARIOS: Record<DesignScenarioId, DesignScenarioDefinition
         label: '方案 A · 暖白叙事杂志风',
         styleDirection:
           'Editorial light brand canvas (#F6F5F1 background, #FFFFFF hairline-bordered panels, oversized serif Hero title with negative tracking, >45% whitespace, single muted slate-indigo accent <10%).',
+        colorMode: 'light',
+        palette: {
+          background: '#F6F5F1',
+          surface: '#FFFFFF',
+          textPrimary: '#141413',
+          textMuted: '#63625E',
+          accent: '#2B4C7E',
+        },
+        surfaceDepth: 'hairline',
+        radiusStyle: 'soft',
       },
       {
         branchId: 'branch-b',
         label: '方案 B · 深炭剧场沉浸风',
         styleDirection:
           'Atmospheric charcoal dark brand stage (#0E0F12 background, #16181D stepped cards, 1px rgba(255,255,255,0.09) borders, bold editorial contrast and crisp warm-amber CTA accent <10%).',
+        colorMode: 'dark',
+        palette: {
+          background: '#0E0F12',
+          surface: '#16181D',
+          textPrimary: '#F3F2EE',
+          textMuted: '#9B9A94',
+          accent: '#D49A4A',
+        },
+        surfaceDepth: 'stepped-dark',
+        radiusStyle: 'soft',
       },
     ],
   },
@@ -117,12 +141,32 @@ export const DESIGN_SCENARIOS: Record<DesignScenarioId, DesignScenarioDefinition
         label: '方案 A · 极简亮色精准工作台',
         styleDirection:
           'Clean light precision SaaS workspace (#F7F7F5 canvas, crisp #FFFFFF 1px-bordered cards, #2554D7 focused primary actions <10%, tabular-nums KPI strip, 44px row tables, generous breathing whitespace).',
+        colorMode: 'light',
+        palette: {
+          background: '#F7F7F5',
+          surface: '#FFFFFF',
+          textPrimary: '#111214',
+          textMuted: '#66686E',
+          accent: '#2554D7',
+        },
+        surfaceDepth: 'hairline',
+        radiusStyle: 'soft',
       },
       {
         branchId: 'branch-b',
         label: '方案 B · 暗夜极客终端风',
         styleDirection:
-          'Modern dark executive dashboard (bg-slate-950 / #0B0D12 canvas, #13161E stepped cards, 1px rgba(255,255,255,0.08) hairline dividers, crisp emerald-400/500 accent <10%, tabular-nums metrics).',
+          'Modern dark executive dashboard (bg-slate-950 / #020617 canvas, #0F172A stepped cards, 1px rgba(255,255,255,0.08) hairline dividers, crisp emerald-400/500 accent <10%, tabular-nums metrics).',
+        colorMode: 'dark',
+        palette: {
+          background: '#020617',
+          surface: '#0F172A',
+          textPrimary: '#F1F5F9',
+          textMuted: '#94A3B8',
+          accent: '#10B981',
+        },
+        surfaceDepth: 'stepped-dark',
+        radiusStyle: 'soft',
       },
     ],
   },
@@ -164,12 +208,32 @@ export const DESIGN_SCENARIOS: Record<DesignScenarioId, DesignScenarioDefinition
         label: '方案 A · 瑞士画廊极简白',
         styleDirection:
           'Minimal Swiss architectural gallery (#F4F2EE warm gallery paper, sharp 0-radius 1px #111 rules, oversized editorial typography, asymmetric 8/4 grid, vermilion #C93B2B accent <10%).',
+        colorMode: 'light',
+        palette: {
+          background: '#F4F2EE',
+          surface: '#FFFFFF',
+          textPrimary: '#111111',
+          textMuted: '#6E6B65',
+          accent: '#C93B2B',
+        },
+        surfaceDepth: 'hairline',
+        radiusStyle: 'sharp',
       },
       {
         branchId: 'branch-b',
         label: '方案 B · 暗调先锋艺术馆',
         styleDirection:
           'Dark avant-garde studio exhibition (#0D0D10 deep obsidian canvas, 1px rgba(255,255,255,0.1) exhibition frames, stark off-white typography, crisp lime/vermilion highlight <10%).',
+        colorMode: 'dark',
+        palette: {
+          background: '#0D0D10',
+          surface: '#16161B',
+          textPrimary: '#F5F4F0',
+          textMuted: '#94938E',
+          accent: '#E04F33',
+        },
+        surfaceDepth: 'stepped-dark',
+        radiusStyle: 'sharp',
       },
     ],
   },
@@ -211,12 +275,32 @@ export const DESIGN_SCENARIOS: Record<DesignScenarioId, DesignScenarioDefinition
         label: '方案 A · 暖纸编辑匠心风',
         styleDirection:
           'Warm tactile craft & editorial commerce (#FAF8F4 linen paper background, #FFFFFF hairline cards, #1D1916 espresso ink, terracotta-roast #9A522B accent <10%, .font-editorial serif hero headings, 50%+ product & origin storytelling area, bespoke line-art SVG vessel/coffee illustration).',
+        colorMode: 'light',
+        palette: {
+          background: '#FAF8F4',
+          surface: '#FFFFFF',
+          textPrimary: '#1D1916',
+          textMuted: '#6E665E',
+          accent: '#9A522B',
+        },
+        surfaceDepth: 'hairline',
+        radiusStyle: 'soft',
       },
       {
         branchId: 'branch-b',
         label: '方案 B · 暗调精品工坊风',
         styleDirection:
           'Intimate dark tasting atelier (#110F0E warm obsidian charcoal, #1A1715 stepped surface, 1px rgba(255,248,240,0.1) hairline borders, muted burnished-amber #D4894A accent <10%, .font-editorial serif display typography, zero neon SaaS greens).',
+        colorMode: 'dark',
+        palette: {
+          background: '#110F0E',
+          surface: '#1A1715',
+          textPrimary: '#F4EFE8',
+          textMuted: '#A19990',
+          accent: '#D4894A',
+        },
+        surfaceDepth: 'stepped-dark',
+        radiusStyle: 'soft',
       },
     ],
   },
@@ -258,12 +342,32 @@ export const DESIGN_SCENARIOS: Record<DesignScenarioId, DesignScenarioDefinition
         label: '方案 A · 纸感杂志长文风',
         styleDirection:
           'Editorial paper print magazine (#FAFAF7 paper canvas, #1A1A1A soft ink, crisp 1px borders, centered 680px reading measure, .font-editorial serif headings, deep botanical green #2E5B4E accent <10%).',
+        colorMode: 'light',
+        palette: {
+          background: '#FAFAF7',
+          surface: '#FFFFFF',
+          textPrimary: '#1A1A1A',
+          textMuted: '#686762',
+          accent: '#2E5B4E',
+        },
+        surfaceDepth: 'hairline',
+        radiusStyle: 'sharp',
       },
       {
         branchId: 'branch-b',
         label: '方案 B · 暗夜书房阅读风',
         styleDirection:
           'Night-owl editorial reading room (#121210 warm dark inkwell, #1B1B18 reading surface, #EAE6DD soft ivory text, warm parchment #D6A86E accent <10%, serif display headlines with generous line-height).',
+        colorMode: 'dark',
+        palette: {
+          background: '#121210',
+          surface: '#1B1B18',
+          textPrimary: '#EAE6DD',
+          textMuted: '#9C968B',
+          accent: '#D6A86E',
+        },
+        surfaceDepth: 'stepped-dark',
+        radiusStyle: 'sharp',
       },
     ],
   },
@@ -305,12 +409,32 @@ export const DESIGN_SCENARIOS: Record<DesignScenarioId, DesignScenarioDefinition
         label: '方案 A · 轻盈暖白拇指流',
         styleDirection:
           'Thumb-first mobile-native light utility (#F7F7F5 canvas, crisp white cards, >=44px pill buttons, clean bottom tab navigation, #2062E8 focus accent <10%, zero desktop clutter).',
+        colorMode: 'light',
+        palette: {
+          background: '#F7F7F5',
+          surface: '#FFFFFF',
+          textPrimary: '#121316',
+          textMuted: '#686B73',
+          accent: '#2062E8',
+        },
+        surfaceDepth: 'subtle-shadow',
+        radiusStyle: 'pill',
       },
       {
         branchId: 'branch-b',
         label: '方案 B · 暗调夜间随行风',
         styleDirection:
           'High-contrast dark mobile companion (#0E1014 canvas, #171A20 stepped cards, >=44px pill controls, bright legible #38BDF8 accent <10%, bottom-anchored thumb actions).',
+        colorMode: 'dark',
+        palette: {
+          background: '#0E1014',
+          surface: '#171A20',
+          textPrimary: '#F3F4F6',
+          textMuted: '#949AA6',
+          accent: '#38BDF8',
+        },
+        surfaceDepth: 'stepped-dark',
+        radiusStyle: 'pill',
       },
     ],
   },
@@ -352,12 +476,32 @@ export const DESIGN_SCENARIOS: Record<DesignScenarioId, DesignScenarioDefinition
         label: '方案 A · 深空精密光学风',
         styleDirection:
           'Stepped dark obsidian tech showcase (#0A0B10 canvas -> #12141C surface, 1px rgba(255,255,255,0.08) hairline edges, subtle single-focus #5B8CFF accent <10%, geometric sans + mono precision specs).',
+        colorMode: 'dark',
+        palette: {
+          background: '#0A0B10',
+          surface: '#12141C',
+          textPrimary: '#F3F4F6',
+          textMuted: '#9499A6',
+          accent: '#5B8CFF',
+        },
+        surfaceDepth: 'stepped-dark',
+        radiusStyle: 'soft',
       },
       {
         branchId: 'branch-b',
         label: '方案 B · 冰白高反差实验室风',
         styleDirection:
           'Stark laboratory daylight contrast (#F8F9FB cool mineral white, #0F1115 obsidian typography & primary actions, 1px crisp architectural rules, precision mono labels).',
+        colorMode: 'light',
+        palette: {
+          background: '#F8F9FB',
+          surface: '#FFFFFF',
+          textPrimary: '#0F1115',
+          textMuted: '#5C6270',
+          accent: '#1E293B',
+        },
+        surfaceDepth: 'hairline',
+        radiusStyle: 'soft',
       },
     ],
   },
@@ -388,21 +532,75 @@ export function getRaceDirectionsForPlan(
       .filter(Boolean)
       .join(' | ');
 
+    const contrasting = ds.colorMode === dirB.colorMode ? dirA : dirB;
     return [
       {
         branchId: 'branch-a',
         label: `方案 A · ${ds.themeName || '已选主题标准实现'}`,
         styleDirection: `Follow the confirmed DesignSystemSpec & user theme strictly: ${themeDetail}.`,
+        colorMode: ds.colorMode,
+        palette: { ...ds.palette },
+        surfaceDepth:
+          ds.surfaceDepth ??
+          (ds.colorMode === 'dark' ? 'stepped-dark' : 'hairline'),
+        radiusStyle: ds.radiusStyle ?? scenarioDef.defaultRadiusStyle,
       },
       {
         branchId: 'branch-b',
-        label: `方案 B · ${dirB.label.replace(/^方案\s*B\s*·\s*/, '')}（同场景对比）`,
-        styleDirection: dirB.styleDirection,
+        label: `方案 B · ${contrasting.label.replace(/^方案\s*[AB]\s*·\s*/, '')}（同场景对比）`,
+        styleDirection: contrasting.styleDirection,
+        colorMode: contrasting.colorMode,
+        palette: { ...contrasting.palette },
+        surfaceDepth: contrasting.surfaceDepth,
+        radiusStyle: contrasting.radiusStyle,
       },
     ];
   }
 
   return [dirA, dirB];
+}
+
+export function resolveBranchDesignSystem(
+  plan: ProductPlan,
+  dir: RaceStyleDirection
+): DesignSystemSpec {
+  const baseDs = plan.designSystem;
+  const def = getScenarioDefinition(baseDs?.scenario);
+
+  if (
+    dir.branchId === 'branch-a' &&
+    baseDs &&
+    (baseDs.themeName || baseDs.customStylePrompt || baseDs.colorMode === dir.colorMode)
+  ) {
+    return {
+      ...baseDs,
+      palette: { ...baseDs.palette },
+      typography: { ...baseDs.typography },
+      antiPatterns: [...baseDs.antiPatterns],
+    };
+  }
+
+  return {
+    scenario: def.id,
+    scenarioName: baseDs?.scenarioName || def.name,
+    tone: baseDs?.tone || def.toneKeywords,
+    colorMode: dir.colorMode,
+    palette: { ...dir.palette },
+    typography: baseDs?.typography
+      ? { ...baseDs.typography }
+      : { ...def.defaultTypography },
+    radiusStyle: dir.radiusStyle ?? baseDs?.radiusStyle ?? def.defaultRadiusStyle,
+    surfaceDepth: dir.surfaceDepth,
+    layoutBlueprint: baseDs?.layoutBlueprint || def.layoutRules,
+    visualFocalPoint:
+      baseDs?.visualFocalPoint || '首屏单一核心视觉焦点与 40–60% 呼吸留白构图',
+    motionStyle: baseDs?.motionStyle || def.motionRules,
+    mediaStrategy: baseDs?.mediaStrategy || def.mediaRule,
+    antiPatterns:
+      baseDs?.antiPatterns && baseDs.antiPatterns.length > 0
+        ? [...baseDs.antiPatterns]
+        : [...def.antiPatterns],
+  };
 }
 
 export function renderDesignMarkdown(

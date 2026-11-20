@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Check,
   Download,
@@ -67,6 +67,62 @@ export function StyleThemeModal({
   const [stylePrompt, setStylePrompt] = useState('');
   const [formError, setFormError] = useState('');
 
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    previousFocusRef.current = document.activeElement as HTMLElement | null;
+
+    const focusTimer = window.setTimeout(() => {
+      const container = dialogRef.current;
+      if (!container) return;
+      const firstFocusable = container.querySelector<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      );
+      (firstFocusable ?? container).focus();
+    }, 0);
+
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onClose();
+        return;
+      }
+      if (e.key !== 'Tab') return;
+      const container = dialogRef.current;
+      if (!container) return;
+      const focusables = Array.from(
+        container.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        )
+      ).filter((el) => el.offsetParent !== null || el === document.activeElement);
+      if (focusables.length === 0) {
+        e.preventDefault();
+        return;
+      }
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      if (!container.contains(document.activeElement)) {
+        e.preventDefault();
+        first.focus();
+      } else if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    }
+
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.clearTimeout(focusTimer);
+      document.removeEventListener('keydown', handleKeyDown);
+      previousFocusRef.current?.focus?.();
+    };
+  }, [open, onClose]);
+
   const allPreviewColors = useMemo(
     () => [background, surface, textPrimary, textMuted, accent],
     [background, surface, textPrimary, textMuted, accent]
@@ -130,7 +186,14 @@ export function StyleThemeModal({
 
     const parsed = styleThemeSchema.safeParse(candidate);
     if (!parsed.success) {
-      setFormError('字段格式或长度超限（名称 ≤60 字，提示词 ≤2000 字）');
+      const hasHexError = parsed.error.issues.some((iss) =>
+        iss.path.includes('palette')
+      );
+      setFormError(
+        hasHexError
+          ? '请输入有效的 Hex 色值（3 位或 6 位，如 #FAF8F4）'
+          : '字段格式或长度超限（名称 ≤60 字，提示词 ≤2000 字）'
+      );
       return;
     }
 
@@ -272,8 +335,20 @@ export function StyleThemeModal({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 backdrop-blur-[2px] p-4">
-      <div className="w-full max-w-4xl max-h-[88vh] flex flex-col rounded-2xl border border-black/[0.1] bg-[#fcfcfb] shadow-[0_24px_60px_rgba(12,12,12,0.18)] overflow-hidden">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 backdrop-blur-[2px] p-4"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="style-theme-modal-title"
+        tabIndex={-1}
+        className="w-full max-w-4xl max-h-[88vh] flex flex-col rounded-2xl border border-black/[0.1] bg-[#fcfcfb] shadow-[0_24px_60px_rgba(12,12,12,0.18)] overflow-hidden focus:outline-none"
+      >
         {/* Header */}
         <div className="h-14 shrink-0 px-5 border-b border-black/[0.08] bg-white flex items-center justify-between gap-3">
           <div className="flex items-center gap-2.5">
@@ -281,7 +356,10 @@ export function StyleThemeModal({
               <Palette className="w-4 h-4" />
             </div>
             <div>
-              <h2 className="text-sm font-semibold text-[#0c0c0c]/95">
+              <h2
+                id="style-theme-modal-title"
+                className="text-sm font-semibold text-[#0c0c0c]/95"
+              >
                 {mode === 'emma' ? '调整方案 UI 主题与风格' : 'UI 设计风格与主题库'}
               </h2>
               <p className="text-[11px] text-[#0c0c0c]/50">

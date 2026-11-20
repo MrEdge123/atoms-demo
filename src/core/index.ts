@@ -35,10 +35,12 @@ export {
   getRaceDirectionsForPlan,
   getScenarioDefinition,
   renderDesignMarkdown,
+  resolveBranchDesignSystem,
   type DesignScenarioDefinition,
   type RaceStyleDirection,
 } from './design-guide';
 export {
   BUILTIN_STYLE_THEMES,
   applyThemeToDesignSystem,
+  createUnthemedDesignSystem,
 } from './style-presets';

@@ -99,22 +99,48 @@ export const BUILTIN_STYLE_THEMES: StyleThemeSpec[] = [
   },
 ];
 
+export function createUnthemedDesignSystem(
+  scenario: DesignScenarioId = 'B'
+): DesignSystemSpec {
+  const def = DESIGN_SCENARIOS[scenario];
+  return {
+    scenario: def.id,
+    scenarioName: def.name,
+    tone: def.toneKeywords,
+    colorMode: def.defaultColorMode,
+    palette: { ...def.defaultPalette },
+    typography: { ...def.defaultTypography },
+    radiusStyle: def.defaultRadiusStyle,
+    surfaceDepth: def.defaultSurfaceDepth,
+    layoutBlueprint: def.layoutRules,
+    visualFocalPoint: '首屏单一核心视觉焦点与 40–60% 呼吸留白构图',
+    motionStyle: def.motionRules,
+    mediaStrategy: def.mediaRule,
+    antiPatterns: [...def.antiPatterns],
+  };
+}
+
 export function applyThemeToDesignSystem(
   current: DesignSystemSpec | undefined,
-  theme: StyleThemeSpec | null
+  theme: StyleThemeSpec | null,
+  fallbackBaseline?: DesignSystemSpec | null
 ): DesignSystemSpec | undefined {
   if (!theme) {
+    if (fallbackBaseline && !fallbackBaseline.themeId) {
+      return {
+        ...fallbackBaseline,
+        palette: { ...fallbackBaseline.palette },
+        typography: { ...fallbackBaseline.typography },
+        antiPatterns: [...fallbackBaseline.antiPatterns],
+      };
+    }
     if (!current) return undefined;
-    return {
-      ...current,
-      themeId: undefined,
-      themeName: undefined,
-      customStylePrompt: undefined,
-    };
+    return createUnthemedDesignSystem(current.scenario);
   }
 
   const scenario: DesignScenarioId = theme.scenario ?? current?.scenario ?? 'B';
   const def = DESIGN_SCENARIOS[scenario];
+  const scenarioChanged = !current || current.scenario !== scenario;
 
   return {
     scenario,
@@ -125,21 +151,25 @@ export function applyThemeToDesignSystem(
     typography: {
       headingStyle: theme.typography.headingStyle,
       bodyStyle: theme.typography.bodyStyle,
-      rationale:
-        current?.typography?.rationale ?? def.defaultTypography.rationale,
+      rationale: scenarioChanged
+        ? def.defaultTypography.rationale
+        : current.typography.rationale,
     },
-    radiusStyle: theme.radiusStyle ?? current?.radiusStyle ?? def.defaultRadiusStyle,
-    surfaceDepth:
-      theme.surfaceDepth ?? current?.surfaceDepth ?? def.defaultSurfaceDepth,
-    layoutBlueprint: current?.layoutBlueprint || def.layoutRules,
-    visualFocalPoint:
-      current?.visualFocalPoint || '首屏单一核心视觉焦点与 40–60% 呼吸留白构图',
-    motionStyle: current?.motionStyle || def.motionRules,
-    mediaStrategy: current?.mediaStrategy || def.mediaRule,
-    antiPatterns:
-      current?.antiPatterns && current.antiPatterns.length > 0
-        ? current.antiPatterns
-        : def.antiPatterns,
+    radiusStyle: theme.radiusStyle ?? def.defaultRadiusStyle,
+    surfaceDepth: theme.surfaceDepth ?? def.defaultSurfaceDepth,
+    layoutBlueprint: scenarioChanged ? def.layoutRules : current.layoutBlueprint,
+    visualFocalPoint: scenarioChanged
+      ? '首屏单一核心视觉焦点与 40–60% 呼吸留白构图'
+      : current.visualFocalPoint,
+    motionStyle: scenarioChanged ? def.motionRules : current.motionStyle,
+    mediaStrategy: scenarioChanged
+      ? def.mediaRule
+      : (current.mediaStrategy ?? def.mediaRule),
+    antiPatterns: scenarioChanged
+      ? [...def.antiPatterns]
+      : current.antiPatterns.length > 0
+        ? [...current.antiPatterns]
+        : [...def.antiPatterns],
     themeId: theme.id,
     themeName: theme.name,
     customStylePrompt: theme.stylePrompt,

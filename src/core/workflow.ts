@@ -26,6 +26,7 @@ import {
 import {
   getRaceDirectionsForPlan,
   renderDesignMarkdown,
+  resolveBranchDesignSystem,
 } from './design-guide';
 import { applyThemeToDesignSystem } from './style-presets';
 import {
@@ -330,7 +331,16 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
               branchId?: string;
             }> = [];
 
-            const designMd = renderDesignMarkdown(mergedPlan, {
+            const branchDesignSystem = resolveBranchDesignSystem(
+              mergedPlan,
+              dir
+            );
+            const branchPlan: ProductPlan = {
+              ...mergedPlan,
+              designSystem: branchDesignSystem,
+            };
+
+            const designMd = renderDesignMarkdown(branchPlan, {
               branchLabel: dir.label,
               branchStyleDirection: dir.styleDirection,
             });
@@ -342,7 +352,7 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
             });
 
             const prompt = buildAlexGeneratePrompt({
-              plan: mergedPlan,
+              plan: branchPlan,
               designMd,
               branchId: dir.branchId,
               styleDirection: `${dir.label}: ${dir.styleDirection}`,
@@ -351,7 +361,7 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
             try {
               const { files, artifact } = await this.buildWithAutoFix({
                 projectId,
-                plan: mergedPlan,
+                plan: branchPlan,
                 baseFiles: { 'DESIGN.md': designMd },
                 initialPrompt: prompt,
                 model: input?.model,
@@ -365,7 +375,10 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
                 branchId: dir.branchId,
                 label: dir.label,
                 styleDirection: dir.styleDirection,
-                files: files['DESIGN.md'] ? files : { 'DESIGN.md': designMd, ...files },
+                designSystem: branchDesignSystem,
+                files: files['DESIGN.md']?.trim()
+                  ? files
+                  : { ...files, 'DESIGN.md': designMd },
                 previewHtml: artifact.ok ? artifact.html : null,
                 errors: artifact.ok ? [] : artifact.errors,
               };
@@ -388,6 +401,7 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
                 branchId: dir.branchId,
                 label: dir.label,
                 styleDirection: dir.styleDirection,
+                designSystem: branchDesignSystem,
                 files: {},
                 previewHtml: null,
                 errors: [{ phase: 'compile', message }],
@@ -467,9 +481,9 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
           buffered.push(ev);
         },
       });
-      const finalFiles = files['DESIGN.md']
+      const finalFiles = files['DESIGN.md']?.trim()
         ? files
-        : { 'DESIGN.md': designMd, ...files };
+        : { ...files, 'DESIGN.md': designMd };
 
       for (const ev of buffered) {
         yield await this.emitAndPersist(projectId, getSeq, ev);
@@ -525,6 +539,12 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
       );
     }
 
+    if (chosen.designSystem && project.plan) {
+      await this.repo.updatePlan(projectId, {
+        ...project.plan,
+        designSystem: chosen.designSystem,
+      });
+    }
     await this.repo.saveDraft(projectId, chosen.files, 'ready');
     await this.repo.saveRaceBranches(projectId, []);
 
@@ -610,7 +630,7 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
 
       // Preserve publishedHtml untouched; only update draftFiles and status.
       const finalIterFiles =
-        rollbackFiles['DESIGN.md'] && !files['DESIGN.md']
+        rollbackFiles['DESIGN.md']?.trim() && !files['DESIGN.md']?.trim()
           ? { ...files, 'DESIGN.md': rollbackFiles['DESIGN.md'] }
           : files;
       const nextStatus = artifact.ok ? 'ready' : 'error';
