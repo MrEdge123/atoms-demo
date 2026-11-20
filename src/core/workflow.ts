@@ -49,6 +49,10 @@ export interface WorkflowEngineDeps {
  * Core SOP orchestrator driving Iris -> Emma (confirmation pause) -> Alex (+ Auto-Fix / Race Mode) -> Publish.
  * Depends purely on domain models and port interfaces.
  */
+function formatLogLabel(value: unknown, fallback = 'default'): string {
+  return typeof value === 'string' && value.trim() ? value.trim() : fallback;
+}
+
 export class AtomsWorkflowEngine implements WorkflowEngine {
   private readonly llm: LLMProvider;
   private readonly builder: AppBuilder;
@@ -56,6 +60,7 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
   private readonly publisher: SitePublisher;
   private readonly apiBaseUrl: string;
   private readonly maxAutoFixRounds: number;
+  private readonly activeRuns = new Map<string, symbol>();
 
   constructor(deps: WorkflowEngineDeps) {
     this.llm = deps.llm;
@@ -64,6 +69,23 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
     this.publisher = deps.publisher;
     this.apiBaseUrl = deps.apiBaseUrl.replace(/\/$/, '');
     this.maxAutoFixRounds = deps.maxAutoFixRounds ?? 2;
+  }
+
+  private acquireProjectLock(projectId: string): symbol {
+    if (this.activeRuns.has(projectId)) {
+      throw new Error('当前项目正在执行生成或构建任务，请等待完成后再操作');
+    }
+    const token = Symbol(projectId);
+    this.activeRuns.set(projectId, token);
+    return token;
+  }
+
+  private releaseProjectLock(projectId: string, token: symbol): boolean {
+    if (this.activeRuns.get(projectId) === token) {
+      this.activeRuns.delete(projectId);
+      return true;
+    }
+    return false;
   }
 
   private async nextSeq(projectId: string): Promise<() => number> {
@@ -102,31 +124,40 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
     idea: string,
     opts?: { model?: string }
   ): AsyncIterable<AgentEvent> {
-    const project = await this.requireProject(projectId);
-    if (isPlanningInProgress(project)) {
-      throw new Error('Iris / Emma 正在分析需求并生成方案，请等待当前流程完成后再重新启动');
-    }
-    if (isBuildingInProgress(project)) {
-      throw new Error('Alex 正在构建中，请等待当前构建完成后再重新启动');
-    }
-    const getSeq = await this.nextSeq(projectId);
-
-    // Clear any stale unchosen Race Mode candidates without touching publishedHtml.
-    if (project.raceBranches.length > 0) {
-      await this.repo.saveRaceBranches(projectId, []);
-    }
-
-    // Phase 1: Iris market research
+    const runToken = this.acquireProjectLock(projectId);
     const started = Date.now();
-    const modelLabel = opts?.model || 'default';
-    console.log(`[Workflow] start begin project=${projectId} model=${modelLabel}`);
-    await this.repo.saveDraft(projectId, project.draftFiles, 'researching');
-    const fallbackStatus: Project['status'] =
-      project.publishedVersion > 0 || Object.keys(project.draftFiles).length > 0
-        ? 'ready'
-        : 'error';
+    const modelLabel = formatLogLabel(opts?.model);
     let completed = false;
+    let statusDirty = false;
+    let fallbackStatus: Project['status'] = 'error';
+    let rollbackFiles: VirtualFS = {};
+
     try {
+      const project = await this.requireProject(projectId);
+      if (isPlanningInProgress(project)) {
+        throw new Error('Iris / Emma 正在分析需求并生成方案，请等待当前流程完成后再重新启动');
+      }
+      if (isBuildingInProgress(project)) {
+        throw new Error('Alex 正在构建中，请等待当前构建完成后再重新启动');
+      }
+      const getSeq = await this.nextSeq(projectId);
+
+      // Clear any stale unchosen Race Mode candidates without touching publishedHtml.
+      if (project.raceBranches.length > 0) {
+        await this.repo.saveRaceBranches(projectId, []);
+      }
+
+      rollbackFiles = project.draftFiles;
+      fallbackStatus =
+        project.publishedVersion > 0 || Object.keys(project.draftFiles).length > 0
+          ? 'ready'
+          : 'error';
+
+      // Phase 1: Iris market research
+      console.log(`[Workflow] start begin project=${projectId} model=${modelLabel}`);
+      await this.repo.saveDraft(projectId, rollbackFiles, 'researching');
+      statusDirty = true;
+
       yield await this.emitAndPersist(projectId, getSeq, {
         role: 'iris',
         type: 'role_start',
@@ -150,7 +181,7 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
       });
 
       // Phase 2: Emma product planning (pauses for user confirmation)
-      await this.repo.saveDraft(projectId, project.draftFiles, 'planning');
+      await this.repo.saveDraft(projectId, rollbackFiles, 'planning');
       yield await this.emitAndPersist(projectId, getSeq, {
         role: 'emma',
         type: 'role_start',
@@ -173,7 +204,7 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
       };
 
       await this.repo.updatePlan(projectId, normalizedPlan);
-      await this.repo.saveDraft(projectId, project.draftFiles, 'awaiting_confirmation');
+      await this.repo.saveDraft(projectId, rollbackFiles, 'awaiting_confirmation');
       completed = true;
       console.log(
         `[Workflow] start done project=${projectId} status=awaiting_confirmation elapsed=${Date.now() - started}ms`
@@ -197,12 +228,13 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
       );
       throw err;
     } finally {
-      if (!completed) {
+      const released = this.releaseProjectLock(projectId, runToken);
+      if (released && statusDirty && !completed) {
         console.warn(
           `[Workflow] start aborted project=${projectId} model=${modelLabel} restoring status=${fallbackStatus} elapsed=${Date.now() - started}ms`
         );
         await this.repo
-          .saveDraft(projectId, project.draftFiles, fallbackStatus)
+          .saveDraft(projectId, rollbackFiles, fallbackStatus)
           .catch(() => undefined);
       }
     }
@@ -216,43 +248,48 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
       mode?: 'linear' | 'race';
     }
   ): AsyncIterable<AgentEvent> {
-    const project = await this.requireProject(projectId);
-    if (isPlanningInProgress(project)) {
-      throw new Error('Iris / Emma 正在分析需求并生成方案，请等待新方案就绪后再确认');
-    }
-    if (isBuildingInProgress(project)) {
-      throw new Error('Alex 正在构建中，请等待当前构建完成后再操作');
-    }
-    if (!project.plan) {
-      throw new Error(`Project "${projectId}" has no product plan to confirm`);
-    }
-
-    const mergedPlan: ProductPlan = {
-      ...project.plan,
-      ...input?.planPatch,
-      capabilities: input?.planPatch?.capabilities ?? project.plan.capabilities,
-      pages: input?.planPatch?.pages ?? project.plan.pages,
-      collections: input?.planPatch?.collections ?? project.plan.collections,
-      seo:
-        input?.planPatch?.seo ??
-        project.plan.seo ?? {
-          title: input?.planPatch?.appName ?? project.plan.appName,
-          description: input?.planPatch?.summary ?? project.plan.summary,
-        },
-    };
-
-    await this.repo.updatePlan(projectId, mergedPlan);
-    const getSeq = await this.nextSeq(projectId);
-    const mode = input?.mode ?? 'linear';
+    const runToken = this.acquireProjectLock(projectId);
+    const mode = input?.mode === 'race' ? 'race' : 'linear';
     const started = Date.now();
-    const modelLabel = input?.model || 'default';
-    await this.repo.saveDraft(projectId, project.draftFiles, 'building');
+    const modelLabel = formatLogLabel(input?.model);
     let completed = false;
-    console.log(
-      `[Workflow] confirmPlan begin project=${projectId} mode=${mode} model=${modelLabel}`
-    );
+    let statusDirty = false;
+    let rollbackFiles: VirtualFS = {};
 
     try {
+      const project = await this.requireProject(projectId);
+      if (isPlanningInProgress(project)) {
+        throw new Error('Iris / Emma 正在分析需求并生成方案，请等待新方案就绪后再确认');
+      }
+      if (isBuildingInProgress(project)) {
+        throw new Error('Alex 正在构建中，请等待当前构建完成后再操作');
+      }
+      if (!project.plan) {
+        throw new Error(`Project "${projectId}" has no product plan to confirm`);
+      }
+
+      const mergedPlan: ProductPlan = {
+        ...project.plan,
+        ...input?.planPatch,
+        capabilities: input?.planPatch?.capabilities ?? project.plan.capabilities,
+        pages: input?.planPatch?.pages ?? project.plan.pages,
+        collections: input?.planPatch?.collections ?? project.plan.collections,
+        seo:
+          input?.planPatch?.seo ??
+          project.plan.seo ?? {
+            title: input?.planPatch?.appName ?? project.plan.appName,
+            description: input?.planPatch?.summary ?? project.plan.summary,
+          },
+      };
+
+      rollbackFiles = project.draftFiles;
+      await this.repo.updatePlan(projectId, mergedPlan);
+      const getSeq = await this.nextSeq(projectId);
+      console.log(
+        `[Workflow] confirmPlan begin project=${projectId} mode=${mode} model=${modelLabel}`
+      );
+      await this.repo.saveDraft(projectId, rollbackFiles, 'building');
+      statusDirty = true;
       if (mode === 'race') {
         yield await this.emitAndPersist(projectId, getSeq, {
           role: 'alex',
@@ -319,7 +356,7 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
         const finalStatus = hasUsableBranch ? 'awaiting_branch_selection' : 'error';
         // Keep existing draftFiles (and any prior published version) strictly untouched
         // until the user explicitly chooses a candidate branch via selectBranch().
-        await this.repo.saveDraft(projectId, project.draftFiles, finalStatus);
+        await this.repo.saveDraft(projectId, rollbackFiles, finalStatus);
         completed = true;
         console.log(
           `[Workflow] confirmPlan done project=${projectId} mode=race status=${finalStatus} elapsed=${Date.now() - started}ms`
@@ -390,12 +427,13 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
       );
       throw err;
     } finally {
-      if (!completed) {
+      const released = this.releaseProjectLock(projectId, runToken);
+      if (released && statusDirty && !completed) {
         console.warn(
           `[Workflow] confirmPlan aborted project=${projectId} mode=${mode} model=${modelLabel} elapsed=${Date.now() - started}ms`
         );
         await this.repo
-          .saveDraft(projectId, project.draftFiles, 'error')
+          .saveDraft(projectId, rollbackFiles, 'error')
           .catch(() => undefined);
       }
     }
@@ -444,26 +482,32 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
     instruction: string,
     opts?: { model?: string }
   ): AsyncIterable<AgentEvent> {
-    const project = await this.requireProject(projectId);
-    const blockReason = getMutationBlockReason(project, 'iterate');
-    if (blockReason) {
-      throw new Error(blockReason);
-    }
-    if (!project.plan) {
-      throw new Error(`Project "${projectId}" must have a confirmed plan before iterating`);
-    }
-    if (Object.keys(project.draftFiles).length === 0) {
-      throw new Error(`Project "${projectId}" has no draft files to iterate on`);
-    }
-
-    const getSeq = await this.nextSeq(projectId);
-    await this.repo.saveDraft(projectId, project.draftFiles, 'building');
+    const runToken = this.acquireProjectLock(projectId);
     const started = Date.now();
-    const modelLabel = opts?.model || 'default';
+    const modelLabel = formatLogLabel(opts?.model);
     let completed = false;
-    console.log(`[Workflow] iterate begin project=${projectId} model=${modelLabel}`);
+    let statusDirty = false;
+    let rollbackFiles: VirtualFS = {};
 
     try {
+      const project = await this.requireProject(projectId);
+      const blockReason = getMutationBlockReason(project, 'iterate');
+      if (blockReason) {
+        throw new Error(blockReason);
+      }
+      if (!project.plan) {
+        throw new Error(`Project "${projectId}" must have a confirmed plan before iterating`);
+      }
+      if (Object.keys(project.draftFiles).length === 0) {
+        throw new Error(`Project "${projectId}" has no draft files to iterate on`);
+      }
+
+      rollbackFiles = project.draftFiles;
+      const getSeq = await this.nextSeq(projectId);
+      console.log(`[Workflow] iterate begin project=${projectId} model=${modelLabel}`);
+      await this.repo.saveDraft(projectId, rollbackFiles, 'building');
+      statusDirty = true;
+
       yield await this.emitAndPersist(projectId, getSeq, {
         role: 'alex',
         type: 'role_start',
@@ -480,10 +524,10 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
       const { files, artifact } = await this.buildWithAutoFix({
         projectId,
         plan: project.plan,
-        baseFiles: project.draftFiles,
+        baseFiles: rollbackFiles,
         initialPrompt: buildAlexIteratePrompt({
           plan: project.plan,
-          files: project.draftFiles,
+          files: rollbackFiles,
           instruction,
         }),
         model: opts?.model,
@@ -516,12 +560,13 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
       );
       throw err;
     } finally {
-      if (!completed) {
+      const released = this.releaseProjectLock(projectId, runToken);
+      if (released && statusDirty && !completed) {
         console.warn(
           `[Workflow] iterate aborted project=${projectId} model=${modelLabel} elapsed=${Date.now() - started}ms`
         );
         await this.repo
-          .saveDraft(projectId, project.draftFiles, 'ready')
+          .saveDraft(projectId, rollbackFiles, 'ready')
           .catch(() => undefined);
       }
     }

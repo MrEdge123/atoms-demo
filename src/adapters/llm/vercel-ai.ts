@@ -33,6 +33,15 @@ function extractJsonObjectText(raw: string): string {
   return cleaned;
 }
 
+function sanitizeErrorMessage(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  return raw
+    .replace(/\b(sk-[A-Za-z0-9_-]{6,})/g, 'sk-***')
+    .replace(/\b(Bearer\s+)[A-Za-z0-9._-]+/gi, '$1***')
+    .replace(/([A-Za-z0-9_]*key\s*[:=]\s*)['"]?[^\s'",;]+/gi, '$1***')
+    .slice(0, 400);
+}
+
 function createStreamAbort(timeoutMs: number) {
   const controller = new AbortController();
   const timer = setTimeout(
@@ -323,8 +332,7 @@ export class VercelAISDKProvider implements LLMProvider {
         }
       }
     } catch (primaryErr) {
-      const primaryMsg =
-        primaryErr instanceof Error ? primaryErr.message : String(primaryErr);
+      const primaryMsg = sanitizeErrorMessage(primaryErr);
       console.warn(
         `[LLM] warn provider=${provider} model=${resolvedModelId} mode=streamObject failed (${Date.now() - started}ms): ${primaryMsg}; trying streamText JSON fallback`
       );
@@ -370,8 +378,7 @@ export class VercelAISDKProvider implements LLMProvider {
         );
         return validated;
       } catch (fallbackErr) {
-        const fallbackMsg =
-          fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
+        const fallbackMsg = sanitizeErrorMessage(fallbackErr);
         console.warn(
           `[LLM] error provider=${provider} model=${resolvedModelId} mode=streamText-fallback failed (${Date.now() - started}ms): ${fallbackMsg} (finishReason=${finishReason}, textLen=${fallbackText.length})`
         );
@@ -415,15 +422,15 @@ export class VercelAISDKProvider implements LLMProvider {
         const { done, value: part } = await reader.read();
         if (done) break;
         if (part.type === 'error') {
-          throw part.error instanceof Error
-            ? part.error
-            : new Error(String(part.error));
+          throw new Error(sanitizeErrorMessage(part.error));
         }
         if (part.type === 'text-delta') {
           yield part.textDelta;
         }
       }
       completed = true;
+    } catch (err) {
+      throw new Error(sanitizeErrorMessage(err));
     } finally {
       abort.cleanup(completed);
       if (!completed) {
