@@ -41,6 +41,7 @@ export interface WorkflowEngine {
       model?: string;
       targetRole?: 'auto' | 'iris' | 'emma' | 'alex';
       mentions?: AgentMentionSpan[];
+      collabStep?: { turnId: string; stepId: string };
       signal?: AbortSignal;
     }
   ): AsyncIterable<AgentEvent>;

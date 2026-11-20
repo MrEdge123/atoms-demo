@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import {
   ATOMS_CLOUD_SDK_SOURCE,
   BUILTIN_STYLE_THEMES,
+  agentReplySchema,
   alexFilesOutputSchema,
   buildAlexGeneratePrompt,
   buildAlexIteratePrompt,
@@ -1975,17 +1976,83 @@ export default function App() {
       })
     );
     expect(callOrder).toEqual(['orchestrator', 'emma_discuss']);
+    const p3Plan = p3Events.find((ev) => ev.type === 'collaboration_plan')
+      ?.payload as { turnId: string };
     const alexGateEv = p3Events.find(
       (ev) =>
         ev.type === 'collaboration_step' &&
         (ev.payload as { role?: string; status?: string }).role === 'alex' &&
         (ev.payload as { status?: string }).status === 'awaiting_confirmation'
-    )?.payload as { status?: string; handoffInstruction?: string };
+    )?.payload as {
+      turnId?: string;
+      stepId?: string;
+      status?: string;
+      handoffInstruction?: string;
+    };
     expect(alexGateEv?.status).toBe('awaiting_confirmation');
     expect(alexGateEv?.handoffInstruction).toBeTruthy();
     expect((await repo.getById(project.id))?.draftFiles['src/App.tsx']).toBe(
       baselineApp
     );
+
+    // 3b. Confirm gated Alex collaboration step -> updates step running -> completed without duplicate prompt
+    callOrder.length = 0;
+    const confirmEvents = await collect(
+      workflow.iterate(project.id, alexGateEv.handoffInstruction!, {
+        model: 'mock-fast',
+        targetRole: 'alex',
+        collabStep: {
+          turnId: p3Plan.turnId,
+          stepId: alexGateEv.stepId ?? 'step-alex',
+        },
+      })
+    );
+    expect(callOrder).toEqual(['alex']);
+    expect(
+      confirmEvents.some(
+        (ev) =>
+          ev.type === 'collaboration_step' &&
+          (ev.payload as { turnId?: string; stepId?: string; status?: string })
+            .turnId === p3Plan.turnId &&
+          (ev.payload as { stepId?: string }).stepId === 'step-alex' &&
+          (ev.payload as { status?: string }).status === 'running'
+      )
+    ).toBe(true);
+    expect(
+      confirmEvents.some(
+        (ev) =>
+          ev.type === 'collaboration_step' &&
+          (ev.payload as { turnId?: string; stepId?: string; status?: string })
+            .turnId === p3Plan.turnId &&
+          (ev.payload as { stepId?: string }).stepId === 'step-alex' &&
+          (ev.payload as { status?: string }).status === 'completed'
+      )
+    ).toBe(true);
+    expect(
+      (
+        confirmEvents.find((ev) => ev.type === 'role_start')?.payload as {
+          continuation?: boolean;
+        }
+      )?.continuation
+    ).toBe(true);
+    expect((await repo.getById(project.id))?.draftFiles['src/App.tsx']).toContain(
+      'bg-blue-800'
+    );
+
+    // 3c. Relaxed agentReplySchema accepts >400-char executeInstruction & nullable followUpQuestion
+    const parsedLongReply = agentReplySchema.parse({
+      reply: '推荐使用深海蓝高对比方案。',
+      options: [
+        {
+          title: '深海蓝高对比方案',
+          description: '对比度更高且按钮主次更鲜明。',
+          executeInstruction: '将全局配色精确改为：'.padEnd(650, 'X'),
+        },
+      ],
+      followUpQuestion: null,
+    });
+    expect(parsedLongReply.options?.[0]?.executeInstruction.length).toBe(650);
+    expect(parsedLongReply.followUpQuestion).toBeNull();
 
     // 4. 1A Straight-Through @Emma + @Alex (decisive -> Emma hands off directly to Alex & compiles)
     callOrder.length = 0;

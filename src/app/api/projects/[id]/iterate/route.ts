@@ -36,6 +36,7 @@ export async function POST(
     model?: string;
     targetRole?: string;
     mentions?: unknown;
+    collabStep?: unknown;
   };
   const rawInput = typeof body.instruction === 'string' ? body.instruction : '';
   const instruction = rawInput.trim();
@@ -107,6 +108,27 @@ export async function POST(
     mentions = nonOverlapping;
   }
 
+  let collabStep: { turnId: string; stepId: string } | undefined;
+  if (body.collabStep !== undefined) {
+    if (!body.collabStep || typeof body.collabStep !== 'object') {
+      return NextResponse.json(
+        { error: 'collabStep must be an object' },
+        { status: 400 }
+      );
+    }
+    const obj = body.collabStep as Record<string, unknown>;
+    const turnId = typeof obj.turnId === 'string' ? obj.turnId.trim() : '';
+    const stepId = typeof obj.stepId === 'string' ? obj.stepId.trim() : '';
+    if (
+      turnId.length > 0 &&
+      turnId.length <= 64 &&
+      stepId.length > 0 &&
+      stepId.length <= 64
+    ) {
+      collabStep = { turnId, stepId };
+    }
+  }
+
   const blockReason = getMutationBlockReason(project, 'iterate');
   if (blockReason) {
     return NextResponse.json({ error: blockReason }, { status: 409 });
@@ -124,6 +146,7 @@ export async function POST(
         model: body.model,
         targetRole,
         mentions,
+        collabStep,
         signal,
       }),
     req

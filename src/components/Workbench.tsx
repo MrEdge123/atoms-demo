@@ -934,6 +934,7 @@ export function Workbench() {
       clearComposer?: boolean;
       targetRole?: 'auto' | 'iris' | 'emma' | 'alex';
       mentions?: AgentMentionSpan[];
+      collabStep?: { turnId: string; stepId: string };
     }
   ) {
     const rawSource = customInstruction ?? composerValue.text;
@@ -967,12 +968,14 @@ export function Workbench() {
     setErrorMsg('');
     setRuntimeError('');
     setShareOpen(false);
-    setOptimisticPrompt({
-      projectId: targetId,
-      text: instruction,
-      mentions: normalizedMentions.length > 0 ? normalizedMentions : undefined,
-      timestamp: new Date().toISOString(),
-    });
+    if (!opts?.collabStep) {
+      setOptimisticPrompt({
+        projectId: targetId,
+        text: instruction,
+        mentions: normalizedMentions.length > 0 ? normalizedMentions : undefined,
+        timestamp: new Date().toISOString(),
+      });
+    }
     setBusyAction(
       effectiveInitialRole === 'emma'
         ? 'Emma 正在梳理产品与视觉建议...'
@@ -996,6 +999,7 @@ export function Workbench() {
           model: selectedModel || undefined,
           targetRole: resolvedTarget,
           mentions: normalizedMentions,
+          ...(opts?.collabStep ? { collabStep: opts.collabStep } : {}),
         }),
       });
       const activeCollabRoles = new Set<string>();
@@ -2188,10 +2192,11 @@ export function Workbench() {
               loadingTitle={displayProject?.title}
               onOpenPreview={() => setRightTab('preview')}
               onOpenCode={() => setRightTab('code')}
-              onRunSuggestion={(inst, role) =>
+              onRunSuggestion={(inst, role, collabStep) =>
                 void handleIterate(inst, {
                   clearComposer: false,
                   targetRole: role ?? 'alex',
+                  collabStep,
                 })
               }
               busy={Boolean(busyAction)}

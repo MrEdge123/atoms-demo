@@ -147,7 +147,7 @@ export type AlexFilesOutput = z.infer<typeof alexFilesOutputSchema>;
 export const intentRouteSchema = z.object({
   targetRole: z.enum(['iris', 'emma', 'alex']),
   intent: z.enum(['research', 'discuss', 'implement']),
-  reason: z.string().min(1).max(200),
+  reason: z.string().min(1).max(400),
 });
 
 export type IntentRouteOutput = z.infer<typeof intentRouteSchema>;
@@ -158,13 +158,13 @@ export type IntentRouteOutput = z.infer<typeof intentRouteSchema>;
  */
 export const multiMentionStepSchema = z.object({
   role: z.enum(['iris', 'emma', 'alex']),
-  subTask: z.string().min(1).max(400),
+  subTask: z.string().min(1).max(1000),
   dependsOn: z.array(z.enum(['iris', 'emma'])).max(2),
-  requireConfirmBeforeRun: z.boolean().optional(),
+  requireConfirmBeforeRun: z.boolean().nullable().optional(),
 });
 
 export const multiMentionPlanSchema = z.object({
-  rationale: z.string().min(1).max(220),
+  rationale: z.string().min(1).max(400),
   steps: z.array(multiMentionStepSchema).min(2).max(3),
 });
 
@@ -178,14 +178,15 @@ export const agentReplySchema = z.object({
   options: z
     .array(
       z.object({
-        title: z.string().min(1).max(60),
-        description: z.string().min(1).max(220),
-        executeInstruction: z.string().min(1).max(400),
+        title: z.string().min(1).max(120),
+        description: z.string().min(1).max(600),
+        executeInstruction: z.string().min(1).max(2000),
       })
     )
-    .max(4)
+    .max(6)
+    .nullable()
     .optional(),
-  followUpQuestion: z.string().max(200).optional(),
+  followUpQuestion: z.string().max(500).nullable().optional(),
 });
 
 export type AgentReplyOutput = z.infer<typeof agentReplySchema>;

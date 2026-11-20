@@ -859,6 +859,7 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
       model?: string;
       targetRole?: 'auto' | 'iris' | 'emma' | 'alex';
       mentions?: AgentMentionSpan[];
+      collabStep?: { turnId: string; stepId: string };
       signal?: AbortSignal;
     }
   ): AsyncIterable<AgentEvent> {
@@ -869,6 +870,10 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
     let statusDirty = false;
     let rollbackFiles: VirtualFS = {};
     let restoreStatus: Project['status'] = 'ready';
+    let nextSeqFn: (() => number) | null = null;
+    let linkedCollabStepRef: { turnId: string; stepId: string } | undefined;
+    let linkedCollabStepStarted = false;
+    let linkedCollabInstruction = '';
 
     try {
       const project = await this.requireProject(projectId);
@@ -898,6 +903,7 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
         seq += 1;
         return seq;
       };
+      nextSeqFn = getSeq;
       const recentContext = formatRecentConversationContext(existingEvents);
 
       const ds = project.plan.designSystem;
@@ -1429,6 +1435,27 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
         `[Workflow] iterate routed project=${projectId} role=${routed.targetRole} intent=${routed.intent} explicit=${routed.explicit} mentions=${persistedMentions.length} model=${modelLabel}`
       );
 
+      const linkedCollabStep =
+        opts?.collabStep && routed.targetRole === 'alex'
+          ? opts.collabStep
+          : undefined;
+      if (linkedCollabStep) {
+        linkedCollabStepRef = linkedCollabStep;
+        linkedCollabInstruction = cleanInstruction;
+        linkedCollabStepStarted = true;
+        yield await this.emitAndPersist(projectId, getSeq, {
+          role: 'system',
+          type: 'collaboration_step',
+          payload: {
+            turnId: linkedCollabStep.turnId,
+            stepId: linkedCollabStep.stepId,
+            role: 'alex',
+            status: 'running',
+            handoffInstruction: cleanInstruction,
+          },
+        });
+      }
+
       const startLabel =
         routed.targetRole === 'emma'
           ? 'Emma 正在梳理产品与视觉建议...'
@@ -1442,6 +1469,9 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
         payload: {
           label: startLabel,
           instruction: rawInstruction,
+          ...(linkedCollabStep
+            ? { continuation: true, turnId: linkedCollabStep.turnId }
+            : {}),
           ...(persistedMentions.length > 0
             ? { mentions: persistedMentions }
             : {}),
@@ -1548,6 +1578,24 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
           : files;
       const nextStatus = artifact.ok ? 'ready' : 'error';
       await this.repo.saveDraft(projectId, finalIterFiles, nextStatus);
+      if (linkedCollabStep) {
+        yield await this.emitAndPersist(projectId, getSeq, {
+          role: 'system',
+          type: 'collaboration_step',
+          payload: {
+            turnId: linkedCollabStep.turnId,
+            stepId: linkedCollabStep.stepId,
+            role: 'alex',
+            status: artifact.ok ? 'completed' : 'failed',
+            handoffInstruction: cleanInstruction,
+            ...(artifact.ok
+              ? {}
+              : {
+                  error: artifact.errors[0]?.message ?? '编译未通过',
+                }),
+          },
+        });
+      }
       completed = true;
       console.log(
         `[Workflow] iterate done project=${projectId} status=${nextStatus} elapsed=${Date.now() - started}ms`
@@ -1560,6 +1608,24 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      if (!opts?.signal?.aborted && linkedCollabStepStarted && linkedCollabStepRef && nextSeqFn) {
+        try {
+          yield await this.emitAndPersist(projectId, nextSeqFn, {
+            role: 'system',
+            type: 'collaboration_step',
+            payload: {
+              turnId: linkedCollabStepRef.turnId,
+              stepId: linkedCollabStepRef.stepId,
+              role: 'alex',
+              status: 'failed',
+              error: msg,
+              handoffInstruction: linkedCollabInstruction,
+            },
+          });
+        } catch {
+          // Preserve original error
+        }
+      }
       console.warn(
         `[Workflow] iterate error project=${projectId} model=${modelLabel} elapsed=${Date.now() - started}ms: ${msg}`
       );

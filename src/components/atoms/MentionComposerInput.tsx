@@ -389,23 +389,24 @@ export function MentionComposerInput({
         parent.insertBefore(chipEl, afterNode);
       }
 
+      if (document.activeElement !== root) {
+        root.focus();
+      }
+      const sel = window.getSelection();
+      if (sel && afterNode.isConnected) {
+        const range = document.createRange();
+        const caretPos = trailingStartsWithSpace
+          ? 0
+          : Math.min(1, (afterNode.textContent ?? '').length);
+        range.setStart(afterNode, caretPos);
+        range.collapse(true);
+        sel.removeAllRanges();
+        sel.addRange(range);
+      }
+
       closeMenu();
       syncFromDom();
       onMentionPick?.(agent.id);
-
-      window.requestAnimationFrame(() => {
-        if (!editorRef.current) return;
-        editorRef.current.focus();
-        const sel = window.getSelection();
-        if (sel && afterNode.isConnected) {
-          const range = document.createRange();
-          const caretPos = Math.min(1, (afterNode.textContent ?? '').length);
-          range.setStart(afterNode, caretPos);
-          range.collapse(true);
-          sel.removeAllRanges();
-          sel.addRange(range);
-        }
-      });
     },
     [closeMenu, syncFromDom, onMentionPick]
   );

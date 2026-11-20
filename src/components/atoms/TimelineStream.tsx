@@ -197,6 +197,9 @@ function buildTimelineItems(events: AgentEvent[]): TimelineItem[] {
         );
         if (target) {
           target.status = status;
+          if (status === 'running' || status === 'completed') {
+            target.error = undefined;
+          }
           if (typeof payload.handoffInstruction === 'string') {
             target.handoffInstruction = payload.handoffInstruction;
           }
@@ -679,7 +682,8 @@ function AgentReplyCard({
   busy?: boolean;
   onRunSuggestion?: (
     instruction: string,
-    targetRole?: 'alex' | 'emma' | 'iris'
+    targetRole?: 'alex' | 'emma' | 'iris',
+    collabStep?: { turnId: string; stepId: string }
   ) => void;
 }) {
   return (
@@ -821,7 +825,8 @@ function CollaborationPlanCard({
   busy?: boolean;
   onRunSuggestion?: (
     instruction: string,
-    targetRole?: 'alex' | 'emma' | 'iris'
+    targetRole?: 'alex' | 'emma' | 'iris',
+    collabStep?: { turnId: string; stepId: string }
   ) => void;
 }) {
   const doneCount = plan.steps.filter((s) => s.status === 'completed').length;
@@ -925,7 +930,10 @@ function CollaborationPlanCard({
                       data-collab-confirm={step.role}
                       disabled={busy}
                       onClick={() =>
-                        onRunSuggestion(step.handoffInstruction!, 'alex')
+                        onRunSuggestion(step.handoffInstruction!, 'alex', {
+                          turnId: plan.turnId,
+                          stepId: step.stepId,
+                        })
                       }
                       className="rounded-full bg-[#4267ff] px-2.5 py-1 text-[10px] font-semibold text-white hover:bg-[#425ce1] disabled:opacity-45 disabled:cursor-not-allowed transition cursor-pointer"
                     >
@@ -948,7 +956,10 @@ function CollaborationPlanCard({
                         data-collab-retry={step.role}
                         disabled={busy}
                         onClick={() =>
-                          onRunSuggestion(step.handoffInstruction!, 'alex')
+                          onRunSuggestion(step.handoffInstruction!, 'alex', {
+                            turnId: plan.turnId,
+                            stepId: step.stepId,
+                          })
                         }
                         className="inline-flex items-center gap-1 rounded-full border border-[#c9444a]/30 bg-white px-2.5 py-0.5 text-[10px] font-medium text-[#b72027] hover:bg-[#c9444a]/[0.06] disabled:opacity-45 disabled:cursor-not-allowed transition cursor-pointer"
                       >
@@ -983,7 +994,8 @@ export function TimelineStream({
   onOpenCode: () => void;
   onRunSuggestion?: (
     instruction: string,
-    targetRole?: 'alex' | 'emma' | 'iris'
+    targetRole?: 'alex' | 'emma' | 'iris',
+    collabStep?: { turnId: string; stepId: string }
   ) => void;
   busy?: boolean;
 }) {
