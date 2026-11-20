@@ -16,7 +16,12 @@ function loadEnvLocal() {
     const eq = line.indexOf('=');
     if (eq === -1) continue;
     const key = line.slice(0, eq).trim();
-    const value = line.slice(eq + 1).trim();
+    const rawValue = line.slice(eq + 1).trim();
+    const value =
+      (rawValue.startsWith('"') && rawValue.endsWith('"')) ||
+      (rawValue.startsWith("'") && rawValue.endsWith("'"))
+        ? rawValue.slice(1, -1)
+        : rawValue;
     if (!process.env[key]) {
       process.env[key] = value;
     }

@@ -97,6 +97,17 @@ const ALL_CAPABILITIES: Array<{ id: CloudCapability; label: string }> = [
   { id: 'ai', label: 'AI 代理' },
 ];
 
+function extractSseError(ev: AgentEvent): string | null {
+  if (
+    ev.type === 'error' &&
+    ev.payload &&
+    typeof (ev.payload as { message?: unknown }).message === 'string'
+  ) {
+    return (ev.payload as { message: string }).message;
+  }
+  return null;
+}
+
 async function readSseStream(
   res: Response,
   onEvent: (ev: AgentEvent) => void
@@ -262,33 +273,42 @@ export function Workbench() {
     []
   );
 
-  const refreshProjectsList = useCallback(async (preferredId?: string | null) => {
-    const reqVersion = listVersionRef.current;
-    const projPromise = fetch('/api/projects', { cache: 'no-store' });
-    const modelPromise = modelsLoadedRef.current
-      ? null
-      : fetch('/api/models', { cache: 'no-store' });
-    const [projRes, modelRes] = await Promise.all([projPromise, modelPromise]);
-    if (modelRes && modelRes.ok) {
-      modelsLoadedRef.current = true;
-      const mData = (await modelRes.json()) as { models: ModelInfo[] };
-      setModels(mData.models);
-      setSelectedModel((prev) => prev || mData.models[0]?.id || 'mock-default');
-    }
-    if (projRes.ok) {
-      const pData = (await projRes.json()) as { projects: Project[] };
-      if (reqVersion !== listVersionRef.current) {
-        return { projects: pData.projects, targetId: null as string | null };
+  const refreshProjectsList = useCallback(
+    async (
+      preferredId?: string | null,
+      retryDepth = 0
+    ): Promise<{ projects: Project[]; targetId: string | null }> => {
+      const reqVersion = listVersionRef.current;
+      const projPromise = fetch('/api/projects', { cache: 'no-store' });
+      const modelPromise = modelsLoadedRef.current
+        ? null
+        : fetch('/api/models', { cache: 'no-store' });
+      const [projRes, modelRes] = await Promise.all([projPromise, modelPromise]);
+      if (modelRes && modelRes.ok) {
+        modelsLoadedRef.current = true;
+        const mData = (await modelRes.json()) as { models: ModelInfo[] };
+        setModels(mData.models);
+        setSelectedModel((prev) => prev || mData.models[0]?.id || 'mock-default');
       }
-      setProjects(pData.projects);
-      const targetId =
-        preferredId && pData.projects.some((p) => p.id === preferredId)
-          ? preferredId
-          : pData.projects[0]?.id ?? null;
-      return { projects: pData.projects, targetId };
-    }
-    return { projects: [] as Project[], targetId: null as string | null };
-  }, []);
+      if (projRes.ok) {
+        const pData = (await projRes.json()) as { projects: Project[] };
+        if (reqVersion !== listVersionRef.current) {
+          if (retryDepth < 1) {
+            return refreshProjectsList(preferredId, retryDepth + 1);
+          }
+          return { projects: pData.projects, targetId: null };
+        }
+        setProjects(pData.projects);
+        const targetId =
+          preferredId && pData.projects.some((p) => p.id === preferredId)
+            ? preferredId
+            : pData.projects[0]?.id ?? null;
+        return { projects: pData.projects, targetId };
+      }
+      return { projects: [] as Project[], targetId: null };
+    },
+    []
+  );
 
   useEffect(() => {
     void refreshProjectsList();
@@ -429,6 +449,8 @@ export function Workbench() {
     setShareOpen(false);
     setBusyAction('Iris / Emma 正在分析需求...');
     let streamError = '';
+    const isCurrentProject = () =>
+      !activeIdRef.current || activeIdRef.current === projectId;
     try {
       const res = await fetch(`/api/projects/${projectId}/start`, {
         method: 'POST',
@@ -439,26 +461,27 @@ export function Workbench() {
         }),
       });
       await readSseStream(res, (ev) => {
-        setEvents((prev) => [...prev, ev]);
-        if (
-          ev.type === 'error' &&
-          ev.payload &&
-          typeof (ev.payload as { message?: unknown }).message === 'string'
-        ) {
-          streamError = (ev.payload as { message: string }).message;
+        if (isCurrentProject()) {
+          setEvents((prev) => [...prev, ev]);
         }
+        const sseErr = extractSseError(ev);
+        if (sseErr) streamError = sseErr;
       });
       const latest = await loadSnapshot(projectId);
       void refreshProjectsList(projectId).catch(() => null);
-      if (latest.data && Object.keys(latest.data.project.draftFiles).length > 0) {
-        setComposerMode('iterate');
+      if (isCurrentProject()) {
+        if (latest.data && Object.keys(latest.data.project.draftFiles).length > 0) {
+          setComposerMode('iterate');
+        }
+        if (streamError) {
+          setErrorMsg(streamError);
+        }
+        setComposerText('');
       }
-      if (streamError) {
-        setErrorMsg(streamError);
-      }
-      setComposerText('');
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : String(err));
+      if (isCurrentProject()) {
+        setErrorMsg(err instanceof Error ? err.message : String(err));
+      }
     } finally {
       setBusyAction('');
     }
@@ -508,6 +531,8 @@ export function Workbench() {
         : 'Alex 正在编写并编译应用...'
     );
     let streamError = '';
+    const isCurrentProject = () =>
+      !activeIdRef.current || activeIdRef.current === targetId;
     try {
       const res = await fetch(`/api/projects/${targetId}/confirm`, {
         method: 'POST',
@@ -519,26 +544,27 @@ export function Workbench() {
         }),
       });
       await readSseStream(res, (ev) => {
-        setEvents((prev) => [...prev, ev]);
-        if (
-          ev.type === 'error' &&
-          ev.payload &&
-          typeof (ev.payload as { message?: unknown }).message === 'string'
-        ) {
-          streamError = (ev.payload as { message: string }).message;
+        if (isCurrentProject()) {
+          setEvents((prev) => [...prev, ev]);
         }
+        const sseErr = extractSseError(ev);
+        if (sseErr) streamError = sseErr;
       });
       const latest = await loadSnapshot(targetId);
       void refreshProjectsList(targetId).catch(() => null);
-      if (latest.data && Object.keys(latest.data.project.draftFiles).length > 0) {
-        setComposerMode('iterate');
+      if (isCurrentProject()) {
+        if (latest.data && Object.keys(latest.data.project.draftFiles).length > 0) {
+          setComposerMode('iterate');
+        }
+        if (streamError) {
+          setErrorMsg(streamError);
+        }
+        setRightTab('preview');
       }
-      if (streamError) {
-        setErrorMsg(streamError);
-      }
-      setRightTab('preview');
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : String(err));
+      if (isCurrentProject()) {
+        setErrorMsg(err instanceof Error ? err.message : String(err));
+      }
     } finally {
       setBusyAction('');
     }
@@ -549,6 +575,8 @@ export function Workbench() {
       return;
     }
     const targetId = activeId;
+    const isCurrentProject = () =>
+      !activeIdRef.current || activeIdRef.current === targetId;
     setErrorMsg('');
     setShareOpen(false);
     setBusyAction('正在切换所选方案...');
@@ -567,10 +595,14 @@ export function Workbench() {
         throw new Error('所选方案已应用，但刷新预览失败，请点击刷新预览按钮');
       }
       void refreshProjectsList(targetId).catch(() => null);
-      setComposerMode('iterate');
-      setRightTab('preview');
+      if (isCurrentProject()) {
+        setComposerMode('iterate');
+        setRightTab('preview');
+      }
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : String(err));
+      if (isCurrentProject()) {
+        setErrorMsg(err instanceof Error ? err.message : String(err));
+      }
     } finally {
       setBusyAction('');
     }
@@ -585,6 +617,8 @@ export function Workbench() {
     setShareOpen(false);
     setBusyAction('Alex 正在按指令迭代修改...');
     let streamError = '';
+    const isCurrentProject = () =>
+      !activeIdRef.current || activeIdRef.current === targetId;
     try {
       const res = await fetch(`/api/projects/${targetId}/iterate`, {
         method: 'POST',
@@ -595,24 +629,25 @@ export function Workbench() {
         }),
       });
       await readSseStream(res, (ev) => {
-        setEvents((prev) => [...prev, ev]);
-        if (
-          ev.type === 'error' &&
-          ev.payload &&
-          typeof (ev.payload as { message?: unknown }).message === 'string'
-        ) {
-          streamError = (ev.payload as { message: string }).message;
+        if (isCurrentProject()) {
+          setEvents((prev) => [...prev, ev]);
         }
+        const sseErr = extractSseError(ev);
+        if (sseErr) streamError = sseErr;
       });
-      if (!customInstruction) setComposerText('');
       await loadSnapshot(targetId);
       void refreshProjectsList(targetId).catch(() => null);
-      if (streamError) {
-        setErrorMsg(streamError);
+      if (isCurrentProject()) {
+        if (!customInstruction) setComposerText('');
+        if (streamError) {
+          setErrorMsg(streamError);
+        }
+        setRightTab('preview');
       }
-      setRightTab('preview');
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : String(err));
+      if (isCurrentProject()) {
+        setErrorMsg(err instanceof Error ? err.message : String(err));
+      }
     } finally {
       setBusyAction('');
     }
@@ -621,6 +656,8 @@ export function Workbench() {
   async function handlePublish() {
     if (!activeId || !hasDraft || publishBlockReason || busyAction) return;
     const targetId = activeId;
+    const isCurrentProject = () =>
+      !activeIdRef.current || activeIdRef.current === targetId;
     setErrorMsg('');
     setBusyAction('正在构建并发布独立生产站点...');
     try {
@@ -638,9 +675,13 @@ export function Workbench() {
       }
       await loadSnapshot(targetId);
       void refreshProjectsList(targetId).catch(() => null);
-      setShareOpen(true);
+      if (isCurrentProject()) {
+        setShareOpen(true);
+      }
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : String(err));
+      if (isCurrentProject()) {
+        setErrorMsg(err instanceof Error ? err.message : String(err));
+      }
     } finally {
       setBusyAction('');
     }

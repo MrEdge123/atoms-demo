@@ -3,6 +3,18 @@ import { corsOptionsResponse, jsonWithCors } from '@/app/api/_utils';
 
 export const dynamic = 'force-dynamic';
 
+function hasPublishedAiCapability(html: string | null): boolean {
+  if (!html) return false;
+  const match = html.match(/window\.__ATOMS_CONFIG__\s*=\s*(\{[\s\S]*?\});\s*<\/script>/);
+  if (!match?.[1]) return false;
+  try {
+    const parsed = JSON.parse(match[1]) as { capabilities?: unknown };
+    return Array.isArray(parsed.capabilities) && parsed.capabilities.includes('ai');
+  } catch {
+    return false;
+  }
+}
+
 export function OPTIONS() {
   return corsOptionsResponse();
 }
@@ -29,7 +41,10 @@ export async function POST(
   if (!project) {
     return jsonWithCors({ error: 'Project not found' }, { status: 404 });
   }
-  if (!project.capabilities.includes('ai')) {
+  if (
+    !project.capabilities.includes('ai') &&
+    !(project.publishedVersion > 0 && hasPublishedAiCapability(project.publishedHtml))
+  ) {
     return jsonWithCors(
       { error: 'AI capability is not enabled for this project' },
       { status: 403 }
