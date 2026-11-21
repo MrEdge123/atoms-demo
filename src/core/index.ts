@@ -28,6 +28,7 @@ export {
 export { ATOMS_CLOUD_SDK_SOURCE, getCloudSdkPromptDocs } from './sdk-client';
 export {
   RACE_STYLE_DIRECTIONS,
+  buildAlexCodeChangeRepairPrompt,
   buildAlexFixPrompt,
   buildAlexGeneratePrompt,
   buildAlexIteratePrompt,
@@ -37,6 +38,7 @@ export {
   buildIrisDiscussPrompt,
   buildIrisPrompt,
   buildMultiMentionPlannerPrompt,
+  extractLiveCodeColorSummary,
 } from './roles';
 export {
   DESIGN_SCENARIOS,

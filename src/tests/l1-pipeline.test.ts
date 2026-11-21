@@ -8,6 +8,8 @@ import {
   alexFilesOutputSchema,
   buildAlexGeneratePrompt,
   buildAlexIteratePrompt,
+  buildEmmaDiscussPrompt,
+  extractLiveCodeColorSummary,
   getCloudSdkPromptDocs,
   getRaceDirectionsForPlan,
   renderDesignMarkdown,
@@ -2145,5 +2147,204 @@ export default function App() {
     const dupRoleStart = p6Events.find((ev) => ev.type === 'role_start')
       ?.payload as { mentions?: Array<{ role: string; start: number }> };
     expect(dupRoleStart?.mentions).toHaveLength(2);
+  });
+
+  it('enforces real code diffs during iterate via DESIGN.md-only auto-repair, code-first file_write ordering, honest noCodeChanges, and anti-stale Emma prompts', async () => {
+    const repo = new MemoryProjectRepository();
+    const baseMock = new MockLLMProvider();
+
+    let mode: 'doc_then_code' | 'always_doc_only' = 'doc_then_code';
+    let alexIterCalls = 0;
+
+    const spyLlm: LLMProvider = {
+      listModels: () => baseMock.listModels(),
+      generateObject: async (input) => {
+        if (input.system.includes('CRITICAL FAILURE RECOVERY')) {
+          alexIterCalls += 1;
+          if (mode === 'always_doc_only') {
+            return input.schema.parse({
+              summary: 'Still only tweaked docs',
+              files: [
+                {
+                  path: 'DESIGN.md',
+                  content: '# DESIGN\nStill #FFB347\n',
+                },
+              ],
+            });
+          }
+          return input.schema.parse({
+            summary: 'Updated source components to emerald green #10B981',
+            files: [
+              {
+                path: 'DESIGN.md',
+                content: '# DESIGN\nUpdated accent #10B981\n',
+              },
+              {
+                path: 'src/App.tsx',
+                content:
+                  'import React from "react";\nexport default function App() { return <div className="bg-[#0F172A] text-[#10B981]">Emerald Updated</div>; }\n',
+              },
+            ],
+          });
+        }
+
+        if (input.system.includes('CODE-FIRST MANDATORY RULES')) {
+          alexIterCalls += 1;
+          const vfsMatch = input.prompt.match(
+            /Current VirtualFS files:\n([\s\S]*?)\n\nUser Iteration Instruction:/
+          );
+          const vfsObj = vfsMatch?.[1]
+            ? (JSON.parse(vfsMatch[1]) as Record<string, string>)
+            : {};
+          const unescapedApp = vfsObj['src/App.tsx'] ?? '';
+          return input.schema.parse({
+            summary: 'Updated DESIGN.md and echoed App.tsx unchanged',
+            files: [
+              {
+                path: 'DESIGN.md',
+                content: '# DESIGN\nChanged doc token to #10B981\n',
+              },
+              {
+                path: 'src/App.tsx',
+                content: unescapedApp,
+              },
+            ],
+          });
+        }
+
+        return baseMock.generateObject(input);
+      },
+      streamText: (input) => baseMock.streamText(input),
+    };
+
+    const workflow = new AtomsWorkflowEngine({
+      repo,
+      llm: spyLlm,
+      builder: new EsbuildStaticBuilder(),
+      publisher: new SameOriginSitePublisher(repo, 'http://localhost:3000'),
+      apiBaseUrl: 'http://localhost:3000',
+    });
+
+    const project = await repo.create({
+      title: '跳跳像素',
+      slug: 'code-diff-guard-test',
+    });
+    await collect(
+      workflow.start(project.id, '帮我做一个跳跃游戏', { model: 'mock-fast' })
+    );
+    await collect(
+      workflow.confirmPlan(project.id, { mode: 'linear', model: 'mock-fast' })
+    );
+
+    const beforeProj = await repo.getById(project.id);
+    expect(beforeProj).toBeTruthy();
+
+    // Seed App.tsx with byte-identical controllable source so our stub can echo or change it
+    const seededFiles = {
+      ...beforeProj!.draftFiles,
+      'src/App.tsx':
+        'import React from "react";\nexport default function App() { return <div className="bg-[#1A1420] text-[#FFB347]">Retro</div>; }\n',
+    };
+    await repo.saveDraft(project.id, seededFiles, 'ready');
+
+    // 1. Live code color extraction & Emma anti-staleness prompt check
+    const colorSummary = extractLiveCodeColorSummary(seededFiles);
+    expect(colorSummary).toContain('#1A1420');
+    expect(colorSummary).toContain('#FFB347');
+    expect(colorSummary).toContain('src/App.tsx');
+
+    const emmaPrompt = buildEmmaDiscussPrompt({
+      plan: {
+        ...beforeProj!.plan!,
+        designSystem: {
+          scenario: 'G',
+          scenarioName: 'Dark Tech Stale',
+          tone: 'stale-initial-tone',
+          colorMode: 'dark',
+          palette: {
+            background: '#0A0A0F',
+            surface: '#12141C',
+            textPrimary: '#E8E8F0',
+            textMuted: '#8A8A9A',
+            accent: '#FF6B35',
+          },
+          typography: {
+            headingStyle: 'geometric-sans',
+            bodyStyle: 'sans',
+            rationale: 'stale initial',
+          },
+          layoutBlueprint: 'centered',
+          visualFocalPoint: 'canvas',
+          motionStyle: 'crisp',
+          antiPatterns: [],
+        },
+      },
+      designMd: '# DESIGN\n背景 `#1A1420` 强调 `#FFB347`',
+      liveCodeColorSummary: colorSummary,
+      message: '我想改配色',
+    });
+    expect(emmaPrompt.prompt).not.toContain('#0A0A0F');
+    expect(emmaPrompt.prompt).not.toContain('stale-initial-tone');
+    expect(emmaPrompt.prompt).toContain('#1A1420');
+    expect(emmaPrompt.prompt).toContain('#FFB347');
+    expect(emmaPrompt.system).toContain('NEVER recommend a palette');
+
+    // 2. DESIGN.md-only + byte-identical TSX triggers auto-repair & emits src/App.tsx changes
+    alexIterCalls = 0;
+    mode = 'doc_then_code';
+    const repairedEvents = await collect(
+      workflow.iterate(project.id, '把主色调改成翡翠绿 #10B981', {
+        model: 'mock-fast',
+        targetRole: 'alex',
+      })
+    );
+    expect(alexIterCalls).toBe(2);
+    expect(
+      repairedEvents.some(
+        (ev) =>
+          ev.type === 'autofix_start' &&
+          JSON.stringify(ev.payload).includes('未修改组件源码')
+      )
+    ).toBe(true);
+
+    const repairFileWrites = repairedEvents
+      .filter((ev) => ev.type === 'file_write')
+      .map((ev) => (ev.payload as { path: string }).path);
+    // Initial round only changed DESIGN.md (unchanged src/App.tsx omitted!), repair round changed src/App.tsx
+    expect(repairFileWrites).toContain('src/App.tsx');
+    const repairedBuildResult = repairedEvents.find(
+      (ev) => ev.type === 'build_result'
+    )?.payload as {
+      ok?: boolean;
+      changedCodeFiles?: number;
+      changedDocFiles?: number;
+      noCodeChanges?: boolean;
+    };
+    expect(repairedBuildResult?.ok).toBe(true);
+    expect(repairedBuildResult?.changedCodeFiles).toBeGreaterThanOrEqual(1);
+    expect(repairedBuildResult?.noCodeChanges).toBe(false);
+    expect(
+      (await repo.getById(project.id))?.draftFiles['src/App.tsx']
+    ).toContain('#10B981');
+
+    // 3. Always doc-only even on repair -> build_result honestly reports noCodeChanges: true
+    alexIterCalls = 0;
+    mode = 'always_doc_only';
+    const docOnlyEvents = await collect(
+      workflow.iterate(project.id, '再调成极光青色', {
+        model: 'mock-fast',
+        targetRole: 'alex',
+      })
+    );
+    expect(alexIterCalls).toBe(2);
+    const docOnlyBuildResult = docOnlyEvents.find(
+      (ev) => ev.type === 'build_result'
+    )?.payload as {
+      ok?: boolean;
+      changedCodeFiles?: number;
+      noCodeChanges?: boolean;
+    };
+    expect(docOnlyBuildResult?.changedCodeFiles).toBe(0);
+    expect(docOnlyBuildResult?.noCodeChanges).toBe(true);
   });
 });

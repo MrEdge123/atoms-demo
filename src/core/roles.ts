@@ -134,37 +134,107 @@ Fix all reported errors cleanly without breaking existing cloud data integration
   };
 }
 
+export function extractLiveCodeColorSummary(
+  files: VirtualFS
+): string | undefined {
+  const hexes = new Set<string>();
+  const codeFilesWithHex: string[] = [];
+
+  for (const [filePath, content] of Object.entries(files)) {
+    const lower = filePath.toLowerCase();
+    if (
+      lower.endsWith('.md') ||
+      !(lower.endsWith('.tsx') || lower.endsWith('.ts') || lower.endsWith('.css'))
+    ) {
+      continue;
+    }
+    const matches = content.match(/#(?:[0-9a-fA-F]{6}|[0-9a-fA-F]{3})\b/g);
+    if (matches && matches.length > 0) {
+      codeFilesWithHex.push(filePath);
+      for (const hex of matches) {
+        hexes.add(hex.toUpperCase());
+      }
+    }
+  }
+
+  if (hexes.size === 0) return undefined;
+  const topHexes = Array.from(hexes).slice(0, 16).join(', ');
+  return `Live Source Code Files With Hex Colors: ${codeFilesWithHex.join(', ')}\nActive Hex Palette Currently Rendered in Source Code: ${topHexes}`;
+}
+
 export function buildAlexIteratePrompt(input: {
   plan: ProductPlan;
   files: VirtualFS;
   instruction: string;
   recentContext?: string;
+  liveCodeColorSummary?: string;
 }): { system: string; prompt: string } {
   const sdkDocs = getCloudSdkPromptDocs(input.plan.capabilities);
   const designGuardrail = getAlexIterateDesignGuardrail(input.plan);
   const discussionSection = input.recentContext?.trim()
     ? `\nRecent Team Discussion Context:\n${input.recentContext.trim()}\n`
     : '';
+  const colorSection = input.liveCodeColorSummary?.trim()
+    ? `\n${input.liveCodeColorSummary.trim()}\n`
+    : '';
   return {
     system: `You are Alex, iterating on an existing Atoms React + TypeScript application.
-Preserve existing @atoms/cloud collection names and data shapes so previously stored user records remain compatible!
-Never block the primary interactive UI behind a full-page fatal error when optional cloud reads fail or the visitor is unauthenticated — degrade gracefully to playable/usable guest mode and use inline non-blocking prompts when login is required for personal data.
-Never render internal SDK or platform jargon ('@atoms/cloud', 'Powered by @atoms/cloud', '数据自主可控', 'PGlite', 'Esbuild', 'Route A+') in any visible UI badges, headings, or footers — preserve clean product branding.
-Allowed packages ONLY: "react", "react-dom", "lucide-react", "clsx", "tailwind-merge", "@atoms/cloud".
-Return strictly valid JSON matching { "summary": string, "files": Array<{ "path": string, "content": string }> }.
+CODE-FIRST MANDATORY RULES:
+- You MUST directly modify the actual React/TypeScript source code files ("src/App.tsx" and/or "src/components/*.tsx") so the user's requested change is genuinely implemented and visibly rendered. Updating "DESIGN.md" alone NEVER changes the rendered application!
+- FULL THEME/COLOR SWEEP: Whenever changing colors, theme mode, or styling, inspect and update EVERY affected component file ("src/App.tsx" and all "src/components/*.tsx", including Tailwind arbitrary hex utilities like bg-[#...]/text-[#...]/border-[#...], inline style objects, and HTML5 <canvas> / ctx.fillStyle / ctx.strokeStyle color constants). Do not leave old color hex codes behind in components or canvas renderers!
+- DIFF-ONLY & CODE-FIRST OUTPUT: In "files", return ONLY the files whose content you actually modified (do NOT return unmodified files verbatim), placing modified "src/**/*.tsx" code files BEFORE "DESIGN.md".
+- Preserve existing @atoms/cloud collection names and data shapes so previously stored user records remain compatible!
+- Never block the primary interactive UI behind a full-page fatal error when optional cloud reads fail or the visitor is unauthenticated — degrade gracefully to playable/usable guest mode and use inline non-blocking prompts when login is required for personal data.
+- Never render internal SDK or platform jargon ('@atoms/cloud', 'Powered by @atoms/cloud', '数据自主可控', 'PGlite', 'Esbuild', 'Route A+') in any visible UI badges, headings, or footers — preserve clean product branding.
+- Allowed packages ONLY: "react", "react-dom", "lucide-react", "clsx", "tailwind-merge", "@atoms/cloud".
+- Return strictly valid JSON matching { "summary": string, "files": Array<{ "path": string, "content": string }> }.
 
 ${sdkDocs}
 ${designGuardrail}`,
     prompt: `Product Plan:
 ${JSON.stringify(input.plan, null, 2)}
-${discussionSection}
+${discussionSection}${colorSection}
 Current VirtualFS files:
 ${JSON.stringify(input.files, null, 2)}
 
 User Iteration Instruction:
 ${input.instruction}
 
-Update the necessary files cleanly while preserving DESIGN.md aesthetic consistency, and return the updated files.`,
+Update the actual TSX/TS component files first (only return changed files, with src/**/*.tsx before DESIGN.md) and return the modified files.`,
+  };
+}
+
+export function buildAlexCodeChangeRepairPrompt(input: {
+  plan: ProductPlan;
+  files: VirtualFS;
+  instruction: string;
+  previousSummary?: string;
+  liveCodeColorSummary?: string;
+}): { system: string; prompt: string } {
+  const sdkDocs = getCloudSdkPromptDocs(input.plan.capabilities);
+  const colorSection = input.liveCodeColorSummary?.trim()
+    ? `\n${input.liveCodeColorSummary.trim()}\n`
+    : '';
+  return {
+    system: `You are Alex at Mini Atoms.
+CRITICAL FAILURE RECOVERY: Your previous iteration response modified ZERO application source code files (only "DESIGN.md" or byte-identical copies of existing code files were returned), so the user saw NO visible change in the live app!
+You MUST now modify the actual React/TypeScript source files ("src/App.tsx" and/or "src/components/*.tsx") so the requested change takes real visual/functional effect in the compiled app:
+- If changing palette or theme colors, search every TSX/TS file (Tailwind [#...] classes, inline styles, and Canvas ctx.fillStyle/strokeStyle color strings) and rewrite them to the requested colors across ALL affected components.
+- Return ONLY the modified files (placing modified "src/**/*.tsx" files first; include "DESIGN.md" only if needed). Never return unmodified files verbatim.
+- Allowed packages ONLY: "react", "react-dom", "lucide-react", "clsx", "tailwind-merge", "@atoms/cloud".
+- Return strictly valid JSON matching { "summary": string, "files": Array<{ "path": string, "content": string }> }.
+
+${sdkDocs}`,
+    prompt: `Product Plan:
+${JSON.stringify(input.plan, null, 2)}
+${input.previousSummary ? `\nPrevious Unapplied Summary:\n${input.previousSummary}\n` : ''}${colorSection}
+Current VirtualFS files (unchanged in code so far):
+${JSON.stringify(input.files, null, 2)}
+
+User Request That Still Needs Real Source Code Changes:
+${input.instruction}
+
+Directly rewrite the affected "src/**/*.tsx" files right now so the rendered preview visibly reflects the user's request.`,
   };
 }
 
@@ -236,24 +306,43 @@ ${input.message}`,
 export function buildEmmaDiscussPrompt(input: {
   plan: ProductPlan | null;
   designMd?: string;
+  liveCodeColorSummary?: string;
   recentContext?: string;
   message: string;
 }): { system: string; prompt: string } {
+  const effectivePlanSummary = input.plan
+    ? input.designMd
+      ? {
+          appName: input.plan.appName,
+          summary: input.plan.summary,
+          targetUsers: input.plan.targetUsers,
+          capabilities: input.plan.capabilities,
+          seo: input.plan.seo,
+          pages: input.plan.pages,
+          collections: input.plan.collections,
+        }
+      : input.plan
+    : null;
   return {
     system: `You are Emma, discussing product and visual design with the user at Mini Atoms.
 Do NOT write or output source code files — you are consulting with the user before Alex edits the code.
 Respond concisely, practically, and warmly in the user's language (Chinese if the prompt is Chinese).
+CRITICAL GROUNDING RULES:
+- Treat "Current DESIGN.md" and "Current Live Code Colors" below as the ONLY source of truth for what colors, theme, and styling the user is seeing right now.
+- NEVER recommend a palette or direction that repeats or closely matches the current live colors! Every option in "options[]" MUST offer a genuinely fresh, visibly distinct palette (clearly contrasting background, surface, and accent hex codes from the current live palette).
+- In every "executeInstruction", explicitly tell Alex to update ALL affected React/TypeScript source code files ("src/App.tsx" and "src/components/*.tsx", including Tailwind [#...] classes, inline styles, and canvas draw colors) FIRST, and then sync "DESIGN.md".
 Provide:
-1. "reply": Direct, tailored product/design advice (3-6 sentences) grounded in the current app and visual system.
+1. "reply": Direct, tailored product/design advice (3-6 sentences) grounded accurately in the CURRENT live app styling.
 2. "options": 2-3 concrete, distinct actionable proposals the user can pick from with one click. Every option MUST have:
    - "title": concise label (<= 24 chars recommended)
    - "description": 1-sentence user-facing benefit / visual effect
-   - "executeInstruction": a crystal-clear, self-contained engineering instruction (with exact hex palette codes, typography, layout, or feature spec) ready to pass directly to Alex if the user clicks it.
+   - "executeInstruction": a crystal-clear, self-contained engineering instruction (with exact hex palette codes AND explicit instruction to update "src/App.tsx" & "src/components/*.tsx" source files as well as "DESIGN.md") ready to pass directly to Alex if the user clicks it.
 3. "followUpQuestion": optional 1 short clarifying question to help the user decide.
 Return strictly valid JSON matching { "reply": string, "options": [{ "title", "description", "executeInstruction" }], "followUpQuestion"?: string }.`,
     prompt: `Current Product Plan:
-${input.plan ? JSON.stringify(input.plan, null, 2) : '(No plan)'}
-${input.designMd ? `\nCurrent DESIGN.md (excerpt):\n${input.designMd.slice(0, 1200)}` : ''}
+${effectivePlanSummary ? JSON.stringify(effectivePlanSummary, null, 2) : '(No plan)'}
+${input.designMd ? `\nCurrent DESIGN.md (live source of truth):\n${input.designMd.slice(0, 2400)}` : ''}
+${input.liveCodeColorSummary ? `\n${input.liveCodeColorSummary}` : ''}
 ${input.recentContext ? `\nRecent Discussion Context:\n${input.recentContext}` : ''}
 
 User Message:

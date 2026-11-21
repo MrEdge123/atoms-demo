@@ -47,6 +47,9 @@ interface AlexRunBlock {
     ok: boolean;
     bundleBytes?: number;
     errors?: Array<{ message: string }>;
+    changedCodeFiles?: number;
+    changedDocFiles?: number;
+    noCodeChanges?: boolean;
   }>;
   routeReason?: string;
   explicitRoute?: boolean;
@@ -376,6 +379,18 @@ function buildTimelineItems(events: AgentEvent[]): TimelineItem[] {
           errors: Array.isArray(payload.errors)
             ? (payload.errors as Array<{ message: string }>)
             : undefined,
+          changedCodeFiles:
+            typeof payload.changedCodeFiles === 'number'
+              ? payload.changedCodeFiles
+              : undefined,
+          changedDocFiles:
+            typeof payload.changedDocFiles === 'number'
+              ? payload.changedDocFiles
+              : undefined,
+          noCodeChanges:
+            typeof payload.noCodeChanges === 'boolean'
+              ? payload.noCodeChanges
+              : undefined,
         });
       }
       continue;
@@ -435,8 +450,33 @@ function AlexRunCard({
 
   const allPassed =
     run.buildResults.length > 0 && run.buildResults.every((b) => b.ok);
-  const firstFile = run.files[0];
-  const extraFilesCount = Math.max(0, run.files.length - 1);
+  const latestBuild = run.buildResults[run.buildResults.length - 1];
+
+  const { codeFiles, docFiles, orderedFiles } = (() => {
+    const byKey = new Map<string, FileWriteItem>();
+    for (const f of run.files) {
+      const k = `${f.branchId ?? ''}::${f.path}`;
+      byKey.set(k, f);
+    }
+    const unique = Array.from(byKey.values());
+    const rankCode = (f: FileWriteItem) => (f.path === 'src/App.tsx' ? 0 : 1);
+    const code = unique
+      .filter((f) => !f.path.toLowerCase().endsWith('.md'))
+      .sort((a, b) => rankCode(a) - rankCode(b));
+    const docs = unique.filter((f) => f.path.toLowerCase().endsWith('.md'));
+    return {
+      codeFiles: code,
+      docFiles: docs,
+      orderedFiles: [...code, ...docs],
+    };
+  })();
+
+  const primaryCodeFile = codeFiles[0];
+  const primaryDocFile = docFiles[0];
+  const extraFilesCount = Math.max(0, orderedFiles.length - 1);
+  const noCodeChanges =
+    Boolean(latestBuild?.noCodeChanges) ||
+    (orderedFiles.length > 0 && codeFiles.length === 0);
 
   return (
     <div className="space-y-2">
@@ -496,12 +536,25 @@ function AlexRunCard({
               </p>
             ))}
 
-          {firstFile && (
+          {(primaryCodeFile || primaryDocFile) && (
             <div className="space-y-1.5">
-              <div className="inline-flex flex-wrap items-center gap-1.5 rounded-xl border border-black/[0.08] bg-white px-2.5 py-1.5 text-[11px] text-[#0c0c0c]/80 shadow-[0_1px_2px_rgba(12,12,12,0.03)]">
-                <FileCode className="w-3.5 h-3.5 text-[#2ba3ff] shrink-0" />
+              <div
+                data-testid="alex-files-pill"
+                className={`inline-flex flex-wrap items-center gap-1.5 rounded-xl border px-2.5 py-1.5 text-[11px] shadow-[0_1px_2px_rgba(12,12,12,0.03)] ${
+                  primaryCodeFile
+                    ? 'border-black/[0.08] bg-white text-[#0c0c0c]/80'
+                    : 'border-amber-500/35 bg-amber-500/[0.08] text-amber-900'
+                }`}
+              >
+                <FileCode
+                  className={`w-3.5 h-3.5 shrink-0 ${
+                    primaryCodeFile ? 'text-[#2ba3ff]' : 'text-amber-600'
+                  }`}
+                />
                 <span className="font-atoms-mono">
-                  写入文件 {firstFile.path}
+                  {primaryCodeFile
+                    ? `更新代码 ${primaryCodeFile.path}`
+                    : `仅更新设计文档 ${primaryDocFile!.path}（未改代码）`}
                 </span>
                 {extraFilesCount > 0 && (
                   <button
@@ -509,32 +562,46 @@ function AlexRunCard({
                     onClick={() => setFilesExpanded((v) => !v)}
                     className="border-l border-black/10 pl-1.5 text-[#4267ff] font-medium hover:underline cursor-pointer"
                   >
-                    {filesExpanded ? '收起' : `显示 ${extraFilesCount} 个更多`}
+                    {filesExpanded ? '收起' : `显示其余 ${extraFilesCount} 个文件`}
                   </button>
                 )}
               </div>
 
               {filesExpanded && (
                 <div className="rounded-xl border border-black/[0.08] bg-white p-2 space-y-1">
-                  {run.files.map((f, idx) => (
-                    <div
-                      key={`${f.path}-${idx}`}
-                      className="flex items-center justify-between gap-2 text-[11px] px-1.5 py-0.5 rounded hover:bg-black/[0.02]"
-                    >
-                      <span className="font-atoms-mono text-[#0c0c0c]/80 truncate">
-                        {f.branchId ? `[${f.branchId}] ` : ''}
-                        {f.path}
-                      </span>
-                      <div className="flex items-center gap-1.5 shrink-0 text-[#0c0c0c]/45">
-                        {f.autoFixRound ? (
-                          <span className="rounded bg-amber-500/12 px-1.5 py-0.5 text-[10px] text-amber-800">
-                            Auto-Fix #{f.autoFixRound}
+                  {orderedFiles.map((f, idx) => {
+                    const isDoc = f.path.toLowerCase().endsWith('.md');
+                    return (
+                      <div
+                        key={`${f.path}-${idx}`}
+                        className="flex items-center justify-between gap-2 text-[11px] px-1.5 py-0.5 rounded hover:bg-black/[0.02]"
+                      >
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span
+                            className={`rounded px-1.5 py-0.5 text-[9px] font-medium shrink-0 ${
+                              isDoc
+                                ? 'bg-black/[0.05] text-[#0c0c0c]/55'
+                                : 'bg-[#2ba3ff]/12 text-[#0b5ca8]'
+                            }`}
+                          >
+                            {isDoc ? '设计文档' : '代码'}
                           </span>
-                        ) : null}
-                        <span className="tabular-nums">{f.bytes} B</span>
+                          <span className="font-atoms-mono text-[#0c0c0c]/80 truncate">
+                            {f.branchId ? `[${f.branchId}] ` : ''}
+                            {f.path}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-1.5 shrink-0 text-[#0c0c0c]/45">
+                          {f.autoFixRound ? (
+                            <span className="rounded bg-amber-500/12 px-1.5 py-0.5 text-[10px] text-amber-800">
+                              Auto-Fix #{f.autoFixRound}
+                            </span>
+                          ) : null}
+                          <span className="tabular-nums">{f.bytes} B</span>
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -578,34 +645,59 @@ function AlexRunCard({
       )}
 
       {allPassed && run.mode === 'linear' && (
-        <div className="rounded-xl border border-[#4267ff]/35 bg-[#4267ff]/[0.06] px-3.5 py-2.5 flex items-center justify-between gap-2">
-          <div className="min-w-0">
-            <div className="text-xs font-semibold text-[#0c0c0c]/90">
-              草稿构建已就绪
+        noCodeChanges ? (
+          <div className="rounded-xl border border-amber-500/35 bg-amber-500/[0.08] px-3.5 py-2.5 flex items-center justify-between gap-2">
+            <div className="min-w-0">
+              <div className="text-xs font-semibold text-amber-950">
+                未检测到组件代码变更
+              </div>
+              <div className="text-[11px] text-amber-900/75 truncate">
+                仅同步了设计文档或当前样式已生效，如需调整界面请补充具体目标
+              </div>
             </div>
-            <div className="text-[11px] text-[#0c0c0c]/55 truncate">
-              共生成 {run.files.length} 个模块文件，可直接预览或迭代
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                onClick={onOpenCode}
+                className="inline-flex items-center gap-1 rounded-full bg-white border border-amber-600/25 px-2.5 py-1 text-[11px] font-medium text-amber-950 hover:bg-amber-50 cursor-pointer"
+              >
+                <Code2 className="w-3 h-3" />
+                源码
+              </button>
             </div>
           </div>
-          <div className="flex items-center gap-1.5 shrink-0">
-            <button
-              type="button"
-              onClick={onOpenPreview}
-              className="inline-flex items-center gap-1 rounded-full bg-white border border-black/10 px-2.5 py-1 text-[11px] font-medium text-[#0c0c0c]/85 hover:bg-black/[0.03] cursor-pointer"
-            >
-              <Eye className="w-3 h-3" />
-              预览
-            </button>
-            <button
-              type="button"
-              onClick={onOpenCode}
-              className="inline-flex items-center gap-1 rounded-full bg-white border border-black/10 px-2.5 py-1 text-[11px] font-medium text-[#0c0c0c]/85 hover:bg-black/[0.03] cursor-pointer"
-            >
-              <Code2 className="w-3 h-3" />
-              源码
-            </button>
+        ) : (
+          <div className="rounded-xl border border-[#4267ff]/35 bg-[#4267ff]/[0.06] px-3.5 py-2.5 flex items-center justify-between gap-2">
+            <div className="min-w-0">
+              <div className="text-xs font-semibold text-[#0c0c0c]/90">
+                草稿构建已就绪
+              </div>
+              <div className="text-[11px] text-[#0c0c0c]/55 truncate">
+                {codeFiles.length > 0
+                  ? `已更新 ${codeFiles.length} 个代码文件${docFiles.length > 0 ? '并同步 DESIGN.md' : ''}，可直接预览或迭代`
+                  : `共生成 ${orderedFiles.length} 个模块文件，可直接预览或迭代`}
+              </div>
+            </div>
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                onClick={onOpenPreview}
+                className="inline-flex items-center gap-1 rounded-full bg-white border border-black/10 px-2.5 py-1 text-[11px] font-medium text-[#0c0c0c]/85 hover:bg-black/[0.03] cursor-pointer"
+              >
+                <Eye className="w-3 h-3" />
+                预览
+              </button>
+              <button
+                type="button"
+                onClick={onOpenCode}
+                className="inline-flex items-center gap-1 rounded-full bg-white border border-black/10 px-2.5 py-1 text-[11px] font-medium text-[#0c0c0c]/85 hover:bg-black/[0.03] cursor-pointer"
+              >
+                <Code2 className="w-3 h-3" />
+                源码
+              </button>
+            </div>
           </div>
-        </div>
+        )
       )}
     </div>
   );

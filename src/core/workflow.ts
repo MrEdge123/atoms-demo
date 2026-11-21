@@ -19,6 +19,7 @@ import type {
   WorkflowEngine,
 } from '../ports';
 import {
+  buildAlexCodeChangeRepairPrompt,
   buildAlexFixPrompt,
   buildAlexGeneratePrompt,
   buildAlexIteratePrompt,
@@ -28,6 +29,7 @@ import {
   buildIrisDiscussPrompt,
   buildIrisPrompt,
   buildMultiMentionPlannerPrompt,
+  extractLiveCodeColorSummary,
 } from './roles';
 import {
   getRaceDirectionsForPlan,
@@ -41,6 +43,7 @@ import {
   intentRouteSchema,
   mergeVirtualFS,
   multiMentionPlanSchema,
+  normalizePath,
   productPlanSchema,
   researchOutputSchema,
   type AgentReplyOutput,
@@ -60,6 +63,112 @@ export interface WorkflowEngineDeps {
   publisher: SitePublisher;
   apiBaseUrl: string;
   maxAutoFixRounds?: number;
+}
+
+function isCodeFilePath(filePath: string): boolean {
+  return !filePath.trim().toLowerCase().endsWith('.md');
+}
+
+function sortFilesCodeFirst<T extends { path: string }>(items: T[]): T[] {
+  const rank = (p: string): number => {
+    const normalized = p.trim();
+    if (normalized === 'src/App.tsx') return 0;
+    if (isCodeFilePath(normalized)) return 1;
+    return 2;
+  };
+  return items
+    .map((item, idx) => ({ item, idx }))
+    .sort((a, b) => rank(a.item.path) - rank(b.item.path) || a.idx - b.idx)
+    .map((entry) => entry.item);
+}
+
+function computeFileChanges(
+  baseFiles: VirtualFS,
+  nextFiles: VirtualFS,
+  candidateFiles: Array<{ path: string; content: string }>,
+  deletes?: string[]
+): {
+  changedFiles: Array<{ path: string; content: string }>;
+  changedCodeCount: number;
+  changedDocCount: number;
+  hasCodeDiff: boolean;
+  hasDocDiff: boolean;
+} {
+  const deduped = new Map<string, string>();
+  for (const file of candidateFiles) {
+    try {
+      deduped.set(normalizePath(file.path), file.content);
+    } catch {
+      // Invalid paths are rejected during mergeVirtualFS
+    }
+  }
+
+  const changed: Array<{ path: string; content: string }> = [];
+  for (const [normPath, content] of deduped.entries()) {
+    if (nextFiles[normPath] !== baseFiles[normPath]) {
+      changed.push({ path: normPath, content: nextFiles[normPath] ?? content });
+    }
+  }
+
+  const deletedPaths: string[] = [];
+  if (deletes) {
+    for (const rawDel of deletes) {
+      try {
+        const normDel = normalizePath(rawDel);
+        if (baseFiles[normDel] !== undefined && nextFiles[normDel] === undefined) {
+          deletedPaths.push(normDel);
+        }
+      } catch {
+        // Ignore invalid paths
+      }
+    }
+  }
+
+  const sortedChanged = sortFilesCodeFirst(changed);
+  const changedCodeCount = sortedChanged.filter((f) =>
+    isCodeFilePath(f.path)
+  ).length;
+  const changedDocCount = sortedChanged.length - changedCodeCount;
+
+  return {
+    changedFiles: sortedChanged,
+    changedCodeCount,
+    changedDocCount,
+    hasCodeDiff:
+      changedCodeCount > 0 || deletedPaths.some((p) => isCodeFilePath(p)),
+    hasDocDiff:
+      changedDocCount > 0 || deletedPaths.some((p) => !isCodeFilePath(p)),
+  };
+}
+
+function computeFinalDiffSummary(
+  baseFiles: VirtualFS,
+  finalFiles: VirtualFS
+): {
+  changedCodeFiles: number;
+  changedDocFiles: number;
+  hasCodeDiff: boolean;
+} {
+  let changedCodeFiles = 0;
+  let changedDocFiles = 0;
+  const allPaths = new Set([
+    ...Object.keys(baseFiles),
+    ...Object.keys(finalFiles),
+  ]);
+  for (const p of allPaths) {
+    if (baseFiles[p] !== finalFiles[p]) {
+      if (isCodeFilePath(p)) {
+        changedCodeFiles += 1;
+      } else {
+        changedDocFiles += 1;
+      }
+    }
+  }
+  return {
+    changedCodeFiles,
+    changedDocFiles,
+    hasCodeDiff: changedCodeFiles > 0,
+  };
 }
 
 /**
@@ -905,6 +1014,7 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
       };
       nextSeqFn = getSeq;
       const recentContext = formatRecentConversationContext(existingEvents);
+      const liveCodeColorSummary = extractLiveCodeColorSummary(rollbackFiles);
 
       const ds = project.plan.designSystem;
       const designSummary = ds
@@ -1051,6 +1161,7 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
                 ? buildEmmaDiscussPrompt({
                     plan: confirmedPlan,
                     designMd: rollbackFiles['DESIGN.md'],
+                    liveCodeColorSummary,
                     recentContext: stepContext || undefined,
                     message: step.subTask,
                   })
@@ -1263,9 +1374,14 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
               files: rollbackFiles,
               instruction: alexHandoff,
               recentContext: alexContext || undefined,
+              liveCodeColorSummary,
             }),
             model: opts?.model,
             abortSignal: opts?.signal,
+            requireCodeChange: !/^\s*(只|仅).*(DESIGN\.md|设计文档)/i.test(
+              alexHandoff
+            ),
+            iterationInstruction: alexHandoff,
             onEvent: (ev) => {
               buffered.push(ev);
             },
@@ -1499,6 +1615,7 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
             ? buildEmmaDiscussPrompt({
                 plan: project.plan,
                 designMd: rollbackFiles['DESIGN.md'],
+                liveCodeColorSummary,
                 recentContext,
                 message: cleanInstruction,
               })
@@ -1559,9 +1676,14 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
           files: rollbackFiles,
           instruction: cleanInstruction,
           recentContext,
+          liveCodeColorSummary,
         }),
         model: opts?.model,
         abortSignal: opts?.signal,
+        requireCodeChange: !/^\s*(只|仅).*(DESIGN\.md|设计文档)/i.test(
+          cleanInstruction
+        ),
+        iterationInstruction: cleanInstruction,
         onEvent: (ev) => {
           buffered.push(ev);
         },
@@ -1707,6 +1829,8 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
     initialPrompt: { system: string; prompt: string };
     model?: string;
     branchId?: string;
+    requireCodeChange?: boolean;
+    iterationInstruction?: string;
     abortSignal?: AbortSignal;
     onEvent: (event: {
       role: AgentRole;
@@ -1729,18 +1853,99 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
       payload: { message: generated.summary },
     });
 
-    let files = mergeVirtualFS(params.baseFiles, generated.files, generated.deletes);
-    for (const file of generated.files) {
+    const emitChangedFileEvents = (
+      prev: VirtualFS,
+      next: VirtualFS,
+      candidateFiles: Array<{ path: string; content: string }>,
+      deletes?: string[],
+      autoFixRound?: number
+    ) => {
+      const diff = computeFileChanges(prev, next, candidateFiles, deletes);
+      for (const file of diff.changedFiles) {
+        params.onEvent({
+          role: 'alex',
+          branchId: params.branchId,
+          type: 'file_write',
+          payload: {
+            path: file.path,
+            bytes: file.content.length,
+            ...(autoFixRound !== undefined ? { autoFixRound } : {}),
+          },
+        });
+      }
+      return diff;
+    };
+
+    let files = mergeVirtualFS(
+      params.baseFiles,
+      generated.files,
+      generated.deletes
+    );
+    const initialDiff = emitChangedFileEvents(
+      params.baseFiles,
+      files,
+      generated.files,
+      generated.deletes
+    );
+    const generatedCodeCandidates = generated.files.filter((f) =>
+      isCodeFilePath(f.path)
+    ).length;
+
+    let round = 0;
+
+    if (
+      params.requireCodeChange &&
+      !initialDiff.hasCodeDiff &&
+      (initialDiff.hasDocDiff || generatedCodeCandidates === 0)
+    ) {
+      if (params.abortSignal?.aborted) {
+        throw (
+          params.abortSignal.reason ?? new Error('Client disconnected')
+        );
+      }
+      round += 1;
       params.onEvent({
         role: 'alex',
         branchId: params.branchId,
-        type: 'file_write',
-        payload: { path: file.path, bytes: file.content.length },
+        type: 'autofix_start',
+        payload: {
+          round,
+          errors: [
+            {
+              message:
+                '仅改动了设计文档，未修改组件源码，正在要求 Alex 补全代码变更...',
+            },
+          ],
+        },
       });
+
+      const repairCodePrompt = buildAlexCodeChangeRepairPrompt({
+        plan: params.plan,
+        files,
+        instruction: params.iterationInstruction ?? '',
+        previousSummary: generated.summary,
+        liveCodeColorSummary: extractLiveCodeColorSummary(files),
+      });
+
+      const codeRepaired = await this.llm.generateObject({
+        ...repairCodePrompt,
+        schema: alexFilesOutputSchema,
+        model: params.model,
+        abortSignal: params.abortSignal,
+      });
+
+      const prevBeforeCodeRepair = files;
+      files = mergeVirtualFS(files, codeRepaired.files, codeRepaired.deletes);
+      emitChangedFileEvents(
+        prevBeforeCodeRepair,
+        files,
+        codeRepaired.files,
+        codeRepaired.deletes,
+        round
+      );
     }
 
     let artifact = await this.compileDraft(params.projectId, params.plan, files);
-    let round = 0;
 
     while (!artifact.ok && round < this.maxAutoFixRounds) {
       if (params.abortSignal?.aborted) {
@@ -1769,26 +1974,44 @@ export class AtomsWorkflowEngine implements WorkflowEngine {
         abortSignal: params.abortSignal,
       });
 
+      const prevBeforeCompileFix = files;
       files = mergeVirtualFS(files, repaired.files, repaired.deletes);
-      for (const file of repaired.files) {
-        params.onEvent({
-          role: 'alex',
-          branchId: params.branchId,
-          type: 'file_write',
-          payload: { path: file.path, bytes: file.content.length, autoFixRound: round },
-        });
-      }
+      emitChangedFileEvents(
+        prevBeforeCompileFix,
+        files,
+        repaired.files,
+        repaired.deletes,
+        round
+      );
 
       artifact = await this.compileDraft(params.projectId, params.plan, files);
     }
+
+    const finalDiff = computeFinalDiffSummary(params.baseFiles, files);
+    const buildResultDiffMeta = {
+      changedCodeFiles: finalDiff.changedCodeFiles,
+      changedDocFiles: finalDiff.changedDocFiles,
+      noCodeChanges: Boolean(params.requireCodeChange && !finalDiff.hasCodeDiff),
+    };
 
     params.onEvent({
       role: 'alex',
       branchId: params.branchId,
       type: 'build_result',
       payload: artifact.ok
-        ? { ok: true, bundleBytes: artifact.bundleBytes, warnings: artifact.warnings, autoFixRounds: round }
-        : { ok: false, errors: artifact.errors, autoFixRounds: round },
+        ? {
+            ok: true,
+            bundleBytes: artifact.bundleBytes,
+            warnings: artifact.warnings,
+            autoFixRounds: round,
+            ...buildResultDiffMeta,
+          }
+        : {
+            ok: false,
+            errors: artifact.errors,
+            autoFixRounds: round,
+            ...buildResultDiffMeta,
+          },
     });
 
     return { files, artifact };
